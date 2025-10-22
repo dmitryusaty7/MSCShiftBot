@@ -1,4 +1,14 @@
-venv/
+# Виртуальные окружения
+.venv/
+
+# Кэш Python
 __pycache__/
+*.py[cod]
+
+# Настройки окружения
 .env
 service_account.json
+
+# Файлы IDE
+.idea/
+.vscode/
