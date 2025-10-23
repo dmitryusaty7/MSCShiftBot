@@ -17,9 +17,9 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 
 from features.utils.messaging import safe_delete
+from services.drive import get_drive
+from services.drive_yadisk import YaDiskError, YaDiskService
 from services.sheets import SheetsService
-from services.storage import get_storage
-from services.yadisk import YandexDiskApiError, YandexDriveService
 
 if TYPE_CHECKING:  # pragma: no cover
     from features.shift_menu import render_shift_menu as RenderShiftMenuFn
@@ -27,7 +27,7 @@ if TYPE_CHECKING:  # pragma: no cover
 router = Router()
 logger = logging.getLogger(__name__)
 _sheets_service: SheetsService | None = None
-_storage_service: YandexDriveService | None = None
+_drive_service: YaDiskService | None = None
 
 
 def _get_sheets_service() -> SheetsService:
@@ -39,13 +39,13 @@ def _get_sheets_service() -> SheetsService:
     return _sheets_service
 
 
-def _get_storage_service() -> YandexDriveService:
+def _get_drive_service() -> YaDiskService:
     """Ленивая инициализация хранилища материалов."""
 
-    global _storage_service
-    if _storage_service is None:
-        _storage_service = get_storage()
-    return _storage_service
+    global _drive_service
+    if _drive_service is None:
+        _drive_service = get_drive()
+    return _drive_service
 
 
 def _render_shift_menu(*args, **kwargs):
@@ -107,13 +107,14 @@ async def start_materials(message: types.Message, state: FSMContext) -> None:
     if row is None:
         row = await asyncio.to_thread(sheets.open_shift_for_user, user_id)
 
-    day_dir = dt.date.today().strftime("%Y-%m-%d")
-    folder_relative = f"{day_dir}/row_{row}_uid_{user_id}"
+    date_str = dt.date.today().strftime("%Y-%m-%d")
 
     try:
-        storage = _get_storage_service()
-        folder_api_path = await asyncio.to_thread(storage.ensure_folder, folder_relative)
-    except (YandexDiskApiError, RuntimeError, ValueError) as exc:
+        drive = _get_drive_service()
+        day_folder = await asyncio.to_thread(drive.make_date_folder, date_str)
+        shift_folder = f"{day_folder}/row_{row}_uid_{user_id}"
+        await asyncio.to_thread(drive.ensure_folder, shift_folder)
+    except (YaDiskError, RuntimeError, ValueError) as exc:
         logger.exception("Не удалось подготовить папку для материалов: %s", exc)
         await message.answer(
             "Не удалось подготовить хранилище материалов. Проверьте настройки токена "
@@ -127,9 +128,8 @@ async def start_materials(message: types.Message, state: FSMContext) -> None:
         user_id=user_id,
         row=row,
         photo_ids=[],
-        day_dir=day_dir,
-        folder_relative=folder_relative,
-        folder_api_path=folder_api_path,
+        date_str=date_str,
+        shift_folder=shift_folder,
     )
     await ask_pvd(message, state)
 
@@ -243,7 +243,7 @@ async def confirm_upload(message: types.Message, state: FSMContext) -> None:
 
     sheets = _get_sheets_service()
     try:
-        storage = _get_storage_service()
+        drive = _get_drive_service()
     except Exception as exc:  # pragma: no cover - зависит от окружения
         logger.exception("Не удалось инициализировать сервис хранения: %s", exc)
         await message.answer(
@@ -252,7 +252,8 @@ async def confirm_upload(message: types.Message, state: FSMContext) -> None:
         return
 
     try:
-        folder_api_path: str = data["folder_api_path"]
+        shift_folder: str = data["shift_folder"]
+        date_str: str = data["date_str"]
         uploaded: list[str] = []
 
         for index, file_id in enumerate(photo_ids, start=1):
@@ -260,12 +261,12 @@ async def confirm_upload(message: types.Message, state: FSMContext) -> None:
             downloaded = await message.bot.download_file(telegram_file.file_path)
             tmp_file = _write_temp_file(downloaded)
             timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            filename = f"photo_{timestamp}_{index:03d}.jpg"
-            file_api_path = f"{folder_api_path}/{filename}"
+            filename = f"row_{row}_uid_{user_id}_{timestamp}_{index:03d}.jpg"
+            file_path = f"{shift_folder}/{filename}"
             try:
                 info = await asyncio.to_thread(
-                    storage.upload_file,
-                    file_api_path,
+                    drive.upload_file,
+                    file_path,
                     tmp_file,
                     "image/jpeg",
                 )
@@ -276,7 +277,9 @@ async def confirm_upload(message: types.Message, state: FSMContext) -> None:
         if not uploaded:
             raise RuntimeError("Не удалось загрузить ни одного файла в хранилище")
 
-        folder_info = f"{folder_api_path}\n" + "\n".join(uploaded)
+        public_url = await asyncio.to_thread(drive.folder_public_link, date_str)
+        if not public_url:
+            raise RuntimeError("Публичная ссылка на папку дня не получена")
 
         await asyncio.to_thread(
             sheets.save_materials_block,
@@ -284,16 +287,20 @@ async def confirm_upload(message: types.Message, state: FSMContext) -> None:
             pvd_m=data.get("pvd", 0),
             pvc_pcs=data.get("pvc", 0),
             tape_pcs=data.get("tape", 0),
-            folder_link=folder_info,
+            folder_link=public_url,
         )
         logger.info(
-            "Материалы сохранены: user_id=%s, row=%s, фото=%s", user_id, row, len(photo_ids)
+            "Материалы сохранены: user_id=%s, row=%s, фото=%s, ссылка=%s",
+            user_id,
+            row,
+            len(photo_ids),
+            public_url,
         )
-    except YandexDiskApiError as exc:  # pragma: no cover - зависит от внешних сервисов
-        logger.exception("Ошибка API Yandex Disk при сохранении материалов: %s", exc)
+    except YaDiskError as exc:  # pragma: no cover - зависит от внешних сервисов
+        logger.exception("Ошибка API Яндекс.Диска при сохранении материалов: %s", exc)
         if exc.status in {401, 403}:
             await message.answer(
-                "Токен Яндекс.Диска недействителен или нет доступа к папке приложения. "
+                "Токен Яндекс-Диска недействителен или у приложения нет прав. "
                 "Проверьте переменные окружения и токен в .env."
             )
         else:
@@ -308,7 +315,7 @@ async def confirm_upload(message: types.Message, state: FSMContext) -> None:
         )
         return
 
-    await message.answer("Фото успешно загружены и сохранены в отчёте.")
+    await message.answer("Фото загружены. Ссылка добавлена в карточку смены.")
     await state.clear()
     await _render_shift_menu(message, user_id, row)
 
