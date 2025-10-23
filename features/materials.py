@@ -5,9 +5,8 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
-import os
 import re
-import tempfile
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from aiogram import F, Router, types
@@ -107,13 +106,11 @@ async def start_materials(message: types.Message, state: FSMContext) -> None:
     if row is None:
         row = await asyncio.to_thread(sheets.open_shift_for_user, user_id)
 
-    date_str = dt.date.today().strftime("%Y-%m-%d")
+    day_title = _format_day_title(dt.datetime.now().astimezone().date())
 
     try:
         drive = _get_drive_service()
-        day_folder = await asyncio.to_thread(drive.make_date_folder, date_str)
-        shift_folder = f"{day_folder}/row_{row}_uid_{user_id}"
-        await asyncio.to_thread(drive.ensure_folder, shift_folder)
+        await asyncio.to_thread(drive.get_or_create_daily_folder, day_title)
     except (YaDiskError, RuntimeError, ValueError) as exc:
         logger.exception("Не удалось подготовить папку для материалов: %s", exc)
         await message.answer(
@@ -127,9 +124,8 @@ async def start_materials(message: types.Message, state: FSMContext) -> None:
     await state.update_data(
         user_id=user_id,
         row=row,
-        photo_ids=[],
-        date_str=date_str,
-        shift_folder=shift_folder,
+        photos=[],
+        day_title=day_title,
     )
     await ask_pvd(message, state)
 
@@ -210,23 +206,24 @@ async def ask_photos_intro(message: types.Message, state: FSMContext) -> None:
 @router.message(MaterialsFSM.photos, F.photo)
 async def on_photo(message: types.Message, state: FSMContext) -> None:
     data = await state.get_data()
-    photo_ids: list[str] = data.get("photo_ids", [])
+    photos: list[dict[str, str]] = data.get("photos", [])
     file_id = message.photo[-1].file_id
-    photo_ids.append(file_id)
-    await state.update_data(photo_ids=photo_ids)
+    time_label = _format_time_label(message.date)
+    photos.append({"file_id": file_id, "time_label": time_label})
+    await state.update_data(photos=photos)
     await message.answer(
-        f"фото добавлено ({len(photo_ids)} шт). можете прислать ещё или «{BTN_CONFIRM}»."
+        f"фото добавлено ({len(photos)} шт). можете прислать ещё или «{BTN_CONFIRM}»."
     )
 
 
 @router.message(MaterialsFSM.photos, F.text == BTN_DEL_LAST)
 async def del_last_photo(message: types.Message, state: FSMContext) -> None:
     data = await state.get_data()
-    photo_ids: list[str] = data.get("photo_ids", [])
-    if photo_ids:
-        photo_ids.pop()
-        await state.update_data(photo_ids=photo_ids)
-        await message.answer(f"последнее фото удалено. осталось: {len(photo_ids)}.")
+    photos: list[dict[str, str]] = data.get("photos", [])
+    if photos:
+        photos.pop()
+        await state.update_data(photos=photos)
+        await message.answer(f"последнее фото удалено. осталось: {len(photos)}.")
     else:
         await message.answer("список фото пуст.")
 
@@ -236,8 +233,8 @@ async def confirm_upload(message: types.Message, state: FSMContext) -> None:
     data = await state.get_data()
     user_id = data["user_id"]
     row = data["row"]
-    photo_ids: list[str] = data.get("photo_ids", [])
-    if not photo_ids:
+    photos: list[dict[str, str]] = data.get("photos", [])
+    if not photos:
         await message.answer("Добавьте хотя бы одно фото перед подтверждением.")
         return
 
@@ -252,34 +249,45 @@ async def confirm_upload(message: types.Message, state: FSMContext) -> None:
         return
 
     try:
-        shift_folder: str = data["shift_folder"]
-        date_str: str = data["date_str"]
-        uploaded: list[str] = []
+        day_title: str = data["day_title"]
+        saved_names: list[str] = []
 
-        for index, file_id in enumerate(photo_ids, start=1):
+        for index, entry in enumerate(photos, start=1):
+            file_id = entry["file_id"]
+            time_label = entry.get("time_label") or _format_time_label(dt.datetime.now())
+
             telegram_file = await message.bot.get_file(file_id)
             downloaded = await message.bot.download_file(telegram_file.file_path)
-            tmp_file = _write_temp_file(downloaded)
-            timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            filename = f"row_{row}_uid_{user_id}_{timestamp}_{index:03d}.jpg"
-            file_path = f"{shift_folder}/{filename}"
-            try:
-                info = await asyncio.to_thread(
-                    drive.upload_file,
-                    file_path,
-                    tmp_file,
-                    "image/jpeg",
-                )
-            finally:
-                _safe_remove(tmp_file)
-            uploaded.append(info.get("name", filename))
+            content = _ensure_bytes(downloaded)
 
-        if not uploaded:
-            raise RuntimeError("Не удалось загрузить ни одного файла в хранилище")
+            ext = _normalize_extension(Path(telegram_file.file_path).suffix)
+            mime = _guess_mime_type(ext)
 
-        public_url = await asyncio.to_thread(drive.folder_public_link, date_str)
+            ordinal = index
+            while True:
+                candidate = f"{time_label}_{user_id}_{ordinal:02d}{ext}"
+                try:
+                    await asyncio.to_thread(
+                        drive.save_photo,
+                        content,
+                        candidate,
+                        day_title,
+                        content_type=mime,
+                    )
+                except YaDiskError as exc:
+                    if exc.status == 409:
+                        ordinal += 1
+                        continue
+                    raise
+                saved_names.append(candidate)
+                break
+
+        if not saved_names:
+            raise RuntimeError("Не удалось сохранить фото в хранилище")
+
+        public_url = await asyncio.to_thread(drive.folder_public_link, day_title)
         if not public_url:
-            raise RuntimeError("Публичная ссылка на папку дня не получена")
+            raise RuntimeError("Не удалось получить публичную ссылку на папку дня")
 
         await asyncio.to_thread(
             sheets.save_materials_block,
@@ -293,7 +301,7 @@ async def confirm_upload(message: types.Message, state: FSMContext) -> None:
             "Материалы сохранены: user_id=%s, row=%s, фото=%s, ссылка=%s",
             user_id,
             row,
-            len(photo_ids),
+            len(saved_names),
             public_url,
         )
     except YaDiskError as exc:  # pragma: no cover - зависит от внешних сервисов
@@ -315,7 +323,7 @@ async def confirm_upload(message: types.Message, state: FSMContext) -> None:
         )
         return
 
-    await message.answer("Фото загружены. Ссылка добавлена в карточку смены.")
+    await message.answer(f"📎 фото сохранены. ссылка на папку: {public_url}")
     await state.clear()
     await _render_shift_menu(message, user_id, row)
 
@@ -337,7 +345,7 @@ async def exit_nav(message: types.Message, state: FSMContext, key: str) -> None:
     await _render_shift_menu(message, data.get("user_id"), data.get("row"))
 
 
-def _write_temp_file(downloaded) -> str:
+def _ensure_bytes(downloaded) -> bytes:
     try:
         if hasattr(downloaded, "read"):
             content = downloaded.read()
@@ -352,16 +360,35 @@ def _write_temp_file(downloaded) -> str:
                 logger.debug("Не удалось закрыть поток загруженного файла", exc_info=True)
     if isinstance(content, str):
         content = content.encode()
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
-    try:
-        tmp.write(content)
-    finally:
-        tmp.close()
-    return tmp.name
+    return bytes(content)
 
 
-def _safe_remove(path: str) -> None:
-    try:
-        os.remove(path)
-    except OSError:
-        logger.debug("Не удалось удалить временный файл %s", path)
+def _normalize_extension(suffix: str) -> str:
+    suffix = (suffix or "").lower()
+    if not suffix.startswith("."):
+        suffix = f".{suffix}" if suffix else ""
+    if suffix in {"", ".jpeg", ".jpg", ".jpe"}:
+        return ".jpg"
+    return suffix
+
+
+def _guess_mime_type(ext: str) -> str:
+    mapping = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp",
+        ".heic": "image/heic",
+    }
+    return mapping.get(ext, "application/octet-stream")
+
+
+def _format_day_title(day: dt.date) -> str:
+    return f"Фотоотчет - {day:%d.%m.%Y}"
+
+
+def _format_time_label(value: dt.datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=dt.timezone.utc)
+    local = value.astimezone()
+    return local.strftime("%H%M%S")

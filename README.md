@@ -79,7 +79,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run_bot.ps1
 
 ## хранилище материалов
 
-Фотографии материалов сохраняются в пользовательской области Яндекс.Диска. Для каждой смены создаётся структура `disk:/MSCShiftBot/<YYYY-MM-DD>/row_<row>_uid_<user>/…`, папка дня автоматически публикуется, а публичная ссылка записывается в Google Sheets.
+Фотографии материалов сохраняются в пользовательской области Яндекс.Диска. Каждый день создаётся папка `disk:/MSCShiftBot/Фотоотчет - DD.MM.YYYY/`, в которую складываются файлы вида `HHMMSS_<telegram_id>_<nn>.jpg`. После загрузки бот публикует папку дня и записывает публичную ссылку в Google Sheets.
 
 1. Получите OAuth-токен с правами `cloud_api:disk.write` (и при необходимости `cloud_api:disk.read`). Самый быстрый способ — перейти по ссылке `https://oauth.yandex.ru/authorize?response_type=token&client_id=<ваш_client_id>` и выдать права выбранному приложению.
 2. В `.env` задайте `DRIVE_PROVIDER=yadisk`, `YADISK_OAUTH_TOKEN=<токен>`, при желании измените корневую папку через `YADISK_ROOT_FOLDER` (по умолчанию `/MSCShiftBot`) и оставьте `YADISK_PUBLISH=true`, чтобы бот публиковал папку дня.

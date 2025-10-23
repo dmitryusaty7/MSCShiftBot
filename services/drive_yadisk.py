@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Iterable
@@ -67,7 +69,9 @@ class YaDiskService:
         self,
         dst_path: str,
         file_path: str | Path,
+        *,
         content_type: str = "application/octet-stream",
+        overwrite: bool = False,
     ) -> dict:
         """Загружает файл и возвращает базовые метаданные."""
 
@@ -76,7 +80,7 @@ class YaDiskService:
         response = self._request(
             "get",
             "/resources/upload",
-            params={"path": disk_path, "overwrite": "true"},
+            params={"path": disk_path, "overwrite": "true" if overwrite else "false"},
         )
         payload = self._safe_json(response)
         href = payload.get("href") if isinstance(payload, dict) else None
@@ -106,7 +110,7 @@ class YaDiskService:
             "post",
             "/resources/publish",
             params={"path": disk_path},
-            expected_status={200, 202, 409},
+            allow={200, 202, 409},
         )
         if response.status_code == 409:
             logger.info("Папка %s уже опубликована", absolute)
@@ -121,20 +125,57 @@ class YaDiskService:
             raise YaDiskError(metadata.status_code, "Не удалось получить public_url", metadata.text)
         return public_url
 
-    def make_date_folder(self, date_str: str) -> str:
-        """Создаёт папку дня и возвращает абсолютный путь вида `/MSCShiftBot/2025-10-24`."""
+    def get_or_create_daily_folder(self, title: str) -> str:
+        """Создаёт (при необходимости) и возвращает абсолютный путь к папке дня."""
 
-        date_str = (date_str or "").strip()
-        if not date_str:
-            raise ValueError("Не задана дата для папки материалов")
-        absolute = self._absolute_path(f"{self._root}/{date_str}")
+        clean_title = (title or "").strip()
+        if not clean_title:
+            raise ValueError("Не указано название папки дня")
+        absolute = self._absolute_path(f"{self._root}/{clean_title}")
         self.ensure_folder(absolute)
         return absolute
 
-    def folder_public_link(self, date_str: str) -> str:
-        """Возвращает public_url для папки дня, публикуя её при необходимости."""
+    def save_photo(
+        self,
+        data: bytes,
+        filename: str,
+        day_title: str,
+        *,
+        content_type: str = "application/octet-stream",
+    ) -> str:
+        """Сохраняет фото в дневной папке и возвращает имя сохранённого файла."""
 
-        absolute = self.make_date_folder(date_str)
+        folder_path = self.get_or_create_daily_folder(day_title)
+        target_path = f"{folder_path}/{filename}"
+        tmp = tempfile.NamedTemporaryFile(delete=False)
+        try:
+            tmp.write(data)
+            tmp.flush()
+        finally:
+            tmp.close()
+
+        try:
+            self.upload_file(target_path, tmp.name, content_type=content_type, overwrite=False)
+        finally:
+            try:
+                os.remove(tmp.name)
+            except OSError:
+                logger.debug("Не удалось удалить временный файл %s", tmp.name)
+
+        return filename
+
+    def folder_public_link(self, title_or_path: str) -> str:
+        """Возвращает public_url для папки, публикуя её при необходимости."""
+
+        value = (title_or_path or "").strip()
+        if not value:
+            raise ValueError("Не указана папка для публикации")
+
+        if value.startswith("/"):
+            absolute = self._absolute_path(value)
+        else:
+            absolute = self.get_or_create_daily_folder(value)
+
         if not self._publish:
             metadata = self._request(
                 "get",
@@ -143,6 +184,7 @@ class YaDiskService:
             )
             info = self._safe_json(metadata)
             return info.get("public_url") or ""
+
         return self.publish_folder(absolute)
 
     # --- внутренние помощники --------------------------------------------
@@ -152,7 +194,7 @@ class YaDiskService:
             "put",
             "/resources",
             params={"path": disk_path},
-            expected_status={201, 202, 409},
+            allow={201, 202, 409},
         )
         if response.status_code == 409:
             logger.debug("Папка %s уже существует", disk_path)
@@ -162,12 +204,12 @@ class YaDiskService:
         method: str,
         path: str,
         *,
-        expected_status: Iterable[int] | None = None,
+        allow: Iterable[int] | None = None,
         retries: int = 3,
         **kwargs,
     ) -> requests.Response:
         url = f"{_API_ROOT}{path}"
-        expected = set(expected_status or {200})
+        allowed = set(allow or {200})
         attempt = 0
         while True:
             attempt += 1
@@ -181,7 +223,7 @@ class YaDiskService:
                 time.sleep(wait)
                 continue
 
-            if response.status_code in expected:
+            if response.status_code in allowed:
                 return response
 
             if response.status_code in {429} or response.status_code >= 500:
