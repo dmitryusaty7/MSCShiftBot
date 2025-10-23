@@ -53,6 +53,7 @@ EXP_COL_I = "I"
 EXP_COL_J = "J"
 EXP_COL_K = "K"
 EXP_COL_TOTAL = "L"
+EXP_COL_CLOSED_AT = "M"
 
 MATERIALS_COL_TG = "B"
 
@@ -896,6 +897,162 @@ class SheetsService:
             )
         )
 
+    def get_shift_summary(
+        self, row: int, spreadsheet_id: Optional[str] = None
+    ) -> dict[str, Any]:
+        """Собирает данные смены из листов расходов, материалов и бригады."""
+
+        sid = spreadsheet_id or require_env("SPREADSHEET_ID")
+        ws_expenses = self._get_worksheet(SHEET_EXPENSES, sid)
+        ws_materials = self._get_worksheet(SHEET_MATERIALS, sid)
+        ws_crew = self._get_worksheet(SHEET_CREW, sid)
+
+        def fetch_row(
+            worksheet: gspread.Worksheet,
+            columns: list[str],
+            *,
+            value_option: str = "UNFORMATTED_VALUE",
+        ) -> list[Any]:
+            ranges = [f"{column}{row}:{column}{row}" for column in columns]
+            data = retry(
+                lambda: worksheet.batch_get(
+                    ranges, value_render_option=value_option
+                )
+            )
+            values: list[Any] = []
+            for block in data:
+                if not block:
+                    values.append("")
+                    continue
+                first = block[0]
+                if isinstance(first, list):
+                    values.append(first[0] if first else "")
+                else:
+                    values.append(first)
+            while len(values) < len(columns):
+                values.append("")
+            return values
+
+        def parse_int(value: Any) -> int:
+            if value is None:
+                return 0
+            if isinstance(value, (int, float)):
+                try:
+                    return int(value)
+                except (ValueError, TypeError):  # pragma: no cover - защитное ветвление
+                    return 0
+            text = str(value).strip().replace("\u202f", "").replace(" ", "")
+            if not text:
+                return 0
+            try:
+                if "." in text:
+                    return int(float(text))
+                return int(text)
+            except ValueError:
+                digits = "".join(ch for ch in text if ch.isdigit() or ch == "-")
+                return int(digits) if digits else 0
+
+        expenses_columns = [
+            EXPENSES_COL_DATE,
+            EXP_COL_SHIP,
+            EXP_COL_HOLDS,
+            EXP_COL_E,
+            EXP_COL_F,
+            EXP_COL_G,
+            EXP_COL_H,
+            EXP_COL_I,
+            EXP_COL_J,
+            EXP_COL_K,
+            EXP_COL_TOTAL,
+        ]
+        expenses_values = fetch_row(ws_expenses, expenses_columns)
+
+        date_value = expenses_values[0]
+        if isinstance(date_value, datetime):
+            date_text = date_value.date().isoformat()
+        elif isinstance(date_value, date):
+            date_text = date_value.isoformat()
+        else:
+            date_text = str(date_value).strip()
+        if not date_text:
+            date_text = date.today().isoformat()
+
+        ship_value = str(expenses_values[1]).strip()
+        holds_value = parse_int(expenses_values[2])
+        driver_cost = parse_int(expenses_values[3])
+        brigadier_cost = parse_int(expenses_values[4])
+        workers_cost = parse_int(expenses_values[5])
+        aux_cost = parse_int(expenses_values[6])
+        food_cost = parse_int(expenses_values[7])
+        taxi_cost = parse_int(expenses_values[8])
+        other_cost = parse_int(expenses_values[9])
+        total_cost = parse_int(expenses_values[10])
+        if total_cost == 0:
+            total_candidate = (
+                driver_cost
+                + brigadier_cost
+                + workers_cost
+                + aux_cost
+                + food_cost
+                + taxi_cost
+                + other_cost
+            )
+            if total_candidate:
+                total_cost = total_candidate
+
+        materials_columns = [
+            MAT_COL_PVD_M,
+            MAT_COL_PVC_PCS,
+            MAT_COL_TAPE_PCS,
+            MAT_COL_FOLDER_LINK,
+        ]
+        materials_values = fetch_row(ws_materials, materials_columns)
+        pvd_value = parse_int(materials_values[0])
+        pvc_value = parse_int(materials_values[1])
+        tape_value = parse_int(materials_values[2])
+        photos_link = str(materials_values[3]).strip()
+
+        crew_columns = [CREW_COL_DRIVER, CREW_COL_WORKERS]
+        crew_values = fetch_row(
+            ws_crew, crew_columns, value_option="FORMATTED_VALUE"
+        )
+        driver_name = str(crew_values[0]).strip()
+        workers_line = str(crew_values[1]).strip()
+        if workers_line:
+            workers_list = [
+                piece.strip()
+                for piece in re.split(r"[;,]", workers_line)
+                if piece.strip()
+            ]
+        else:
+            workers_list = []
+
+        return {
+            "date": date_text,
+            "ship": ship_value,
+            "holds": holds_value,
+            "expenses": {
+                "driver": driver_cost,
+                "brigadier": brigadier_cost,
+                "workers": workers_cost,
+                "aux": aux_cost,
+                "food": food_cost,
+                "taxi": taxi_cost,
+                "other": other_cost,
+                "total": total_cost,
+            },
+            "materials": {
+                "pvd_rolls_m": pvd_value,
+                "pvc_tubes": pvc_value,
+                "tape": tape_value,
+                "photos_link": photos_link or None,
+            },
+            "crew": {
+                "driver": driver_name,
+                "workers": workers_list,
+            },
+        }
+
     def materials_all_filled(
         self, row: int, spreadsheet_id: Optional[str] = None
     ) -> bool:
@@ -957,6 +1114,75 @@ class SheetsService:
 
         driver_value, workers_value = values
         return bool(driver_value) and bool(workers_value)
+
+    def is_shift_closed(
+        self, row: int, spreadsheet_id: Optional[str] = None
+    ) -> bool:
+        """Проверяет, закрыта ли смена (есть отметка о закрытии в листе расходов)."""
+
+        sid = spreadsheet_id or require_env("SPREADSHEET_ID")
+        ws_expenses = self._get_worksheet(SHEET_EXPENSES, sid)
+        closed_column = getattr(self, "EXP_COL_CLOSED_AT", EXP_COL_CLOSED_AT)
+        cell = retry(lambda: ws_expenses.acell(f"{closed_column}{row}"))
+        return bool((cell.value or "").strip())
+
+    def finalize_shift(
+        self,
+        user_id: int,
+        row: int,
+        spreadsheet_id: Optional[str] = None,
+    ) -> bool:
+        """Помечает смену закрытой и увеличивает счётчик закрытых смен пользователя."""
+
+        sid = spreadsheet_id or require_env("SPREADSHEET_ID")
+        ws_expenses = self._get_worksheet(SHEET_EXPENSES, sid)
+        ws_data = self._get_worksheet(SHEET_DATA, sid)
+        closed_column = getattr(self, "EXP_COL_CLOSED_AT", EXP_COL_CLOSED_AT)
+
+        closed_cell = retry(lambda: ws_expenses.acell(f"{closed_column}{row}"))
+        if (closed_cell.value or "").strip():
+            logger.info("Смена уже закрыта (user_id=%s, row=%s)", user_id, row)
+            return False
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        updates: list[dict[str, object]] = [
+            {
+                "range": f"{ws_expenses.title}!{closed_column}{row}",
+                "values": [[timestamp]],
+            }
+        ]
+
+        user_row = self._find_user_row_in_data(ws_data, user_id)
+        if user_row:
+            closed_counter_cell = retry(
+                lambda: ws_data.acell(f"{DATA_COL_CLOSED_SHIFTS}{user_row}")
+            )
+            raw_counter = (closed_counter_cell.value or "").strip()
+            try:
+                current_counter = int(raw_counter)
+            except ValueError:
+                current_counter = 0
+            updates.append(
+                {
+                    "range": f"{ws_data.title}!{DATA_COL_CLOSED_SHIFTS}{user_row}",
+                    "values": [[str(current_counter + 1)]],
+                }
+            )
+        else:
+            logger.warning(
+                "Не найден пользователь в листе 'Данные' для закрытия смены (user_id=%s)",
+                user_id,
+            )
+
+        spreadsheet = self._get_spreadsheet(sid)
+        retry(
+            lambda: spreadsheet.values_batch_update(
+                {"valueInputOption": "USER_ENTERED", "data": updates}
+            )
+        )
+        logger.info("Смена закрыта (user_id=%s, row=%s)", user_id, row)
+        return True
 
     def _last_nonempty_row_in_column(
         self, worksheet: gspread.Worksheet, column_letter: str

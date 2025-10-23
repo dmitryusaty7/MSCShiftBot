@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime
 
-from aiogram import Router, types
+from aiogram import F, Router, types
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 
 from features.utils.locks import acquire_user_lock, release_user_lock
 from features.utils.messaging import safe_delete, send_progress
 from services.sheets import SheetsService
+from services.env import get_group_chat_id, group_notifications_enabled
 
 router = Router()
 _service: SheetsService | None = None
@@ -42,6 +44,7 @@ BTN_EXPENSES_LABEL = "🧾 Расходы"
 BTN_MATERIALS_LABEL = "📦 Материалы"
 BTN_CREW_LABEL = "👥 Бригада"
 BTN_BACK = "⬅ Назад в главное меню"
+BTN_CLOSE_SHIFT = "🔒 Закрыть смену"
 
 # ---- стиль статусов: 'emoji' | 'traffic' | 'text'
 STATUS_STYLE = "emoji"
@@ -66,16 +69,27 @@ def _line(label: str, done: bool) -> str:
     return f"{label} — {status_badge(done)}"
 
 
-def _keyboard(expenses_ok: bool, materials_ok: bool, crew_ok: bool) -> types.ReplyKeyboardMarkup:
+def _keyboard(
+    expenses_ok: bool,
+    materials_ok: bool,
+    crew_ok: bool,
+    *,
+    close_enabled: bool,
+) -> types.ReplyKeyboardMarkup:
     """Собирает клавиатуру меню смены."""
 
     keyboard = ReplyKeyboardBuilder()
     keyboard.button(text=_line(BTN_EXPENSES_LABEL, expenses_ok))
     keyboard.button(text=_line(BTN_MATERIALS_LABEL, materials_ok))
     keyboard.button(text=_line(BTN_CREW_LABEL, crew_ok))
-    keyboard.adjust(1, 1, 1)
+    if close_enabled:
+        keyboard.button(text=BTN_CLOSE_SHIFT)
     keyboard.button(text=BTN_BACK)
-    keyboard.adjust(1)
+    layout = [1, 1, 1]
+    if close_enabled:
+        layout.append(1)
+    layout.append(1)
+    keyboard.adjust(*layout)
     return keyboard.as_markup(resize_keyboard=True)
 
 
@@ -143,16 +157,35 @@ async def render_shift_menu(
     if progress is None or row_index is None:
         return
 
-    text = (
+    try:
+        shift_closed = await asyncio.to_thread(
+            sheets.is_shift_closed, row_index
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Не удалось проверить, закрыта ли смена (user_id=%s, row=%s)",
+            user_id,
+            row_index,
+        )
+        shift_closed = False
+
+    close_enabled = all(progress.values()) and not shift_closed
+
+    base_text = (
         "выберите раздел для заполнения.\n"
         "в каждом нужно указать данные по текущей смене."
     )
+    if shift_closed:
+        base_text += (
+            "\n\nсмена уже закрыта. если нужно начать новую — вернитесь в главное меню."
+        )
     await message.answer(
-        text,
+        base_text,
         reply_markup=_keyboard(
             expenses_ok=progress["expenses"],
             materials_ok=progress["materials"],
             crew_ok=progress["crew"],
+            close_enabled=close_enabled,
         ),
     )
 
@@ -192,3 +225,269 @@ async def go_crew(message: types.Message, state: FSMContext) -> None:
     from features.crew import start_crew
 
     await start_crew(message, state)
+
+
+def _format_number(value: int) -> str:
+    """Форматирует число с пробелами в качестве разделителей тысяч."""
+
+    return f"{value:,}".replace(",", " ")
+
+
+def _format_date_for_summary(date_value: str) -> str:
+    """Приводит дату в формат ДД.ММ.ГГГГ, если удаётся разобрать ISO-строку."""
+
+    text = (date_value or "").strip()
+    if not text:
+        return "—"
+    for pattern in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%d.%m.%Y"):
+        try:
+            parsed = datetime.strptime(text, pattern)
+            return parsed.strftime("%d.%m.%Y")
+        except ValueError:
+            continue
+    return text
+
+
+def render_group_summary(brigadier: str, summary: dict[str, object]) -> str:
+    """Собирает текст сводки для отправки в групповой чат."""
+
+    expenses = summary.get("expenses", {}) if isinstance(summary, dict) else {}
+    materials = summary.get("materials", {}) if isinstance(summary, dict) else {}
+    crew = summary.get("crew", {}) if isinstance(summary, dict) else {}
+
+    date_text = _format_date_for_summary(str(summary.get("date", "")))
+    ship = str(summary.get("ship", "")).strip() or "—"
+    holds = summary.get("holds", 0)
+    try:
+        holds_text = str(int(holds))
+    except (TypeError, ValueError):
+        holds_text = "—"
+
+    def amount(key: str) -> str:
+        value = 0
+        if isinstance(expenses, dict):
+            raw = expenses.get(key, 0)
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                value = 0
+        return _format_number(value)
+
+    total_amount = 0
+    if isinstance(expenses, dict):
+        raw_total = expenses.get("total", 0)
+        try:
+            total_amount = int(raw_total)
+        except (TypeError, ValueError):
+            total_amount = 0
+    total_text = _format_number(total_amount)
+
+    pvd = 0
+    pvc = 0
+    tape = 0
+    photos_link = None
+    if isinstance(materials, dict):
+        try:
+            pvd = int(materials.get("pvd_rolls_m", 0) or 0)
+        except (TypeError, ValueError):
+            pvd = 0
+        try:
+            pvc = int(materials.get("pvc_tubes", 0) or 0)
+        except (TypeError, ValueError):
+            pvc = 0
+        try:
+            tape = int(materials.get("tape", 0) or 0)
+        except (TypeError, ValueError):
+            tape = 0
+        link_candidate = materials.get("photos_link")
+        if isinstance(link_candidate, str) and link_candidate.strip():
+            photos_link = link_candidate.strip()
+
+    driver_name = "—"
+    workers_names = "—"
+    if isinstance(crew, dict):
+        driver_candidate = crew.get("driver", "")
+        if isinstance(driver_candidate, str) and driver_candidate.strip():
+            driver_name = driver_candidate.strip()
+        workers_candidate = crew.get("workers", [])
+        if isinstance(workers_candidate, list):
+            cleaned = [
+                str(item).strip()
+                for item in workers_candidate
+                if str(item).strip()
+            ]
+            if cleaned:
+                workers_names = "; ".join(cleaned)
+
+    materials_line = (
+        f"материалы: ПВД {pvd} м, ПВХ {pvc} шт, лента {tape} шт"
+    )
+    photos_line = f"фото: {photos_link}" if photos_link else "фото: —"
+
+    lines = [
+        f"бригада: {brigadier or '—'}",
+        f"дата: {date_text} | судно: {ship} | трюмов: {holds_text}",
+        "",
+        (
+            "расходы (₽): "
+            f"водитель {amount('driver')}, "
+            f"бригадир {amount('brigadier')}, "
+            f"рабочие {amount('workers')}, "
+            f"вспом. {amount('aux')}, "
+            f"питание {amount('food')}, "
+            f"такси {amount('taxi')}, "
+            f"прочие {amount('other')}"
+        ),
+        f"итого: {total_text}",
+        "",
+        materials_line,
+        photos_line,
+        "",
+        (
+            "состав: "
+            f"водитель — {driver_name}; "
+            f"рабочие — {workers_names}"
+        ),
+    ]
+    return "\n".join(lines)
+
+
+@router.message(F.text == BTN_CLOSE_SHIFT)
+async def close_shift(message: types.Message) -> None:
+    """Обрабатывает закрытие смены и отправку сводки."""
+
+    user_id = message.from_user.id
+    sheets = _resolve_service(None)
+
+    try:
+        row = await asyncio.to_thread(
+            sheets.get_shift_row_index_for_user, user_id
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Не удалось получить строку смены для закрытия (user_id=%s)",
+            user_id,
+        )
+        await message.answer(
+            "не удалось определить рабочую строку. попробуйте позже или обратитесь к координатору."
+        )
+        return
+
+    if not row:
+        await message.answer(
+            "рабочая строка не найдена. начните смену заново через главное меню."
+        )
+        return
+
+    try:
+        already_closed = await asyncio.to_thread(sheets.is_shift_closed, row)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Не удалось проверить состояние закрытия смены (user_id=%s, row=%s)",
+            user_id,
+            row,
+        )
+        await message.answer(
+            "не удалось проверить состояние смены. попробуйте позже."
+        )
+        return
+
+    if already_closed:
+        await message.answer("смена уже закрыта.")
+        return
+
+    try:
+        progress = await asyncio.to_thread(
+            sheets.get_shift_progress, user_id, row
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Не удалось получить прогресс смены перед закрытием (user_id=%s, row=%s)",
+            user_id,
+            row,
+        )
+        await message.answer(
+            "не удалось проверить заполненность разделов. попробуйте позже."
+        )
+        return
+
+    if not all(progress.values()):
+        await message.answer(
+            "не все разделы заполнены. заполните разделы и попробуйте снова."
+        )
+        return
+
+    try:
+        summary = await asyncio.to_thread(sheets.get_shift_summary, row)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Не удалось собрать сводку смены (user_id=%s, row=%s)",
+            user_id,
+            row,
+        )
+        await message.answer(
+            "не удалось сформировать сводку. попробуйте позже."
+        )
+        return
+
+    try:
+        closed_now = await asyncio.to_thread(
+            sheets.finalize_shift, user_id, row
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Ошибка при закрытии смены (user_id=%s, row=%s)", user_id, row
+        )
+        await message.answer(
+            "не удалось закрыть смену. попробуйте позже или обратитесь к координатору."
+        )
+        return
+
+    if not closed_now:
+        await message.answer("смена уже закрыта.")
+        return
+
+    notifications_enabled = group_notifications_enabled()
+    group_id: int | None = None
+    if notifications_enabled:
+        try:
+            group_id = get_group_chat_id()
+        except RuntimeError as error:
+            notifications_enabled = False
+            logger.error("Некорректный GROUP_CHAT_ID: %s", error)
+
+    group_sent = False
+    if notifications_enabled and group_id is not None:
+        brigadier_name = (
+            message.from_user.full_name
+            or message.from_user.username
+            or str(user_id)
+        )
+        text = render_group_summary(brigadier_name, summary)
+        try:
+            await message.bot.send_message(
+                chat_id=group_id,
+                text=text,
+                disable_web_page_preview=True,
+            )
+            group_sent = True
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Не удалось отправить сводку в чат %s", group_id
+            )
+
+    confirmation = (
+        "смена закрыта. сводка отправлена в общий чат."
+        if group_sent
+        else "смена закрыта."
+    )
+    await message.answer(confirmation)
+
+    await render_shift_menu(
+        message,
+        user_id,
+        row,
+        service=sheets,
+        delete_trigger_message=True,
+        show_progress=False,
+    )
