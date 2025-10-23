@@ -8,6 +8,7 @@ from aiogram import Router, types
 from aiogram.filters import Command
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 
+from features.shift_menu import render_shift_menu
 from services.sheets import SheetsService, UserProfile
 
 router = Router()
@@ -55,7 +56,7 @@ async def show_menu(
         return
 
     text = (
-        f"Здравствуйте, {profile.fio}.\n\n"
+        f"Здравствуйте, {profile.fio}\n\n"
         f"Вы закрыли {profile.closed_shifts} смен."
     )
     await message.answer(text, reply_markup=_menu_keyboard())
@@ -73,9 +74,6 @@ async def start_shift(message: types.Message) -> None:
     """Создаёт или подготавливает рабочую строку смены для пользователя."""
 
     user_id = message.from_user.id
-    row_index = _get_service().open_shift_for_user(user_id)
-    await message.answer(
-        "Смена создана/подготовлена.\n"
-        f"Рабочая строка №{row_index} синхронизирована во всех листах.\n"
-        "Можно продолжать оформление в разделах.",
-    )
+    service = _get_service()
+    row_index = service.open_shift_for_user(user_id)
+    await render_shift_menu(message, user_id, row_index, service=service)

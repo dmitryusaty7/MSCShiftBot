@@ -17,7 +17,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import date
-from typing import Callable, Optional, Tuple, TypeVar
+from typing import Any, Callable, Optional, Tuple, TypeVar
 
 import gspread
 from gspread.exceptions import APIError
@@ -50,6 +50,11 @@ CREW_COL_FIO = "E"
 DATA_COL_TG = "A"
 DATA_COL_FIO = "E"
 DATA_COL_CLOSED_SHIFTS = "F"
+
+# пользовательские столбцы, которые нужно заполнить вручную
+EXPENSES_USER_COLS = [chr(code) for code in range(ord("C"), ord("L") + 1)]
+MATERIALS_USER_COLS = ["A"] + [chr(code) for code in range(ord("C"), ord("N") + 1)]
+CREW_USER_COLS = ["A", "C", "D", "F", "G"]
 
 T = TypeVar("T")
 
@@ -184,6 +189,10 @@ def get_client() -> gspread.Client:
 
 class SheetsService:
     """Обёртка вокруг gspread для операций регистрации."""
+
+    EXPENSES_USER_COLS = EXPENSES_USER_COLS
+    MATERIALS_USER_COLS = MATERIALS_USER_COLS
+    CREW_USER_COLS = CREW_USER_COLS
 
     def __init__(self) -> None:
         self.client = get_client()
@@ -468,6 +477,47 @@ class SheetsService:
         )
         return target_row
 
+    def get_shift_row_index_for_user(
+        self, telegram_id: int, spreadsheet_id: Optional[str] = None
+    ) -> Optional[int]:
+        """Возвращает индекс последней рабочей строки пользователя, если он есть."""
+
+        sid = spreadsheet_id or require_env("SPREADSHEET_ID")
+        ws_expenses = self._get_worksheet(SHEET_EXPENSES, sid)
+        ws_materials = self._get_worksheet(SHEET_MATERIALS, sid)
+        ws_crew = self._get_worksheet(SHEET_CREW, sid)
+
+        last_rows = [
+            self._last_row_with_tg(ws_expenses, EXPENSES_COL_TG, telegram_id),
+            self._last_row_with_tg(ws_materials, MATERIALS_COL_TG, telegram_id),
+            self._last_row_with_tg(ws_crew, CREW_COL_TG, telegram_id),
+        ]
+        candidates = [row for row in last_rows if row]
+        return max(candidates) if candidates else None
+
+    def get_shift_progress(
+        self,
+        telegram_id: int,
+        row: int,
+        spreadsheet_id: Optional[str] = None,
+    ) -> dict[str, bool]:
+        """Возвращает готовность разделов смены."""
+
+        sid = spreadsheet_id or require_env("SPREADSHEET_ID")
+        ws_expenses = self._get_worksheet(SHEET_EXPENSES, sid)
+        ws_materials = self._get_worksheet(SHEET_MATERIALS, sid)
+        ws_crew = self._get_worksheet(SHEET_CREW, sid)
+
+        expenses_cols = getattr(self, "EXPENSES_USER_COLS", EXPENSES_USER_COLS)
+        materials_cols = getattr(self, "MATERIALS_USER_COLS", MATERIALS_USER_COLS)
+        crew_cols = getattr(self, "CREW_USER_COLS", CREW_USER_COLS)
+
+        return {
+            "expenses": self._row_all_filled(ws_expenses, row, expenses_cols),
+            "materials": self._row_all_filled(ws_materials, row, materials_cols),
+            "crew": self._row_all_filled(ws_crew, row, crew_cols),
+        }
+
     def _compute_target_row_for_user(
         self, telegram_id: int, spreadsheet_id: Optional[str] = None
     ) -> int:
@@ -535,3 +585,27 @@ class SheetsService:
             if str(value).strip() == str(telegram_id):
                 last = index
         return last
+
+    def _row_all_filled(
+        self, worksheet: gspread.Worksheet, row: int, columns: list[str]
+    ) -> bool:
+        """Проверяет заполнение всех указанных ячеек в строке."""
+
+        ranges = [f"{col}{row}:{col}{row}" for col in columns]
+        data = retry(
+            lambda: worksheet.batch_get(ranges, value_render_option="UNFORMATTED_VALUE")
+        )
+
+        if len(data) < len(columns):
+            data = list(data) + [[] for _ in range(len(columns) - len(data))]
+
+        def _non_empty(block: list[list[Any]] | list[Any]) -> bool:
+            if not block:
+                return False
+            first_row = block[0] if isinstance(block[0], list) else block
+            if not first_row:
+                return False
+            value = first_row[0]
+            return str(value).strip() != ""
+
+        return all(_non_empty(cell) for cell in data)
