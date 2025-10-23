@@ -67,7 +67,7 @@ MAT_COL_TAPE_PCS = "J"
 MAT_COL_FOLDER_LINK = "N"
 
 CREW_COL_TG = "B"
-CREW_COL_DRIVER = "E"
+CREW_COL_DRIVER = "F"
 CREW_COL_WORKERS = "G"
 
 DATA_COL_TG = "A"
@@ -673,7 +673,6 @@ class SheetsService:
         i: int | None = None,
         j: int | None = None,
         k: int | None = None,
-        total: int | None = None,
     ) -> None:
         """Сохраняет указанные поля в листе «Расходы смены» для строки смены."""
 
@@ -692,7 +691,6 @@ class SheetsService:
         i_col = getattr(self, "EXP_COL_I", EXP_COL_I)
         j_col = getattr(self, "EXP_COL_J", EXP_COL_J)
         k_col = getattr(self, "EXP_COL_K", EXP_COL_K)
-        total_col = getattr(self, "EXP_COL_TOTAL", EXP_COL_TOTAL)
 
         pending: list[tuple[str, list[list[Any]]]] = []
 
@@ -709,8 +707,6 @@ class SheetsService:
         put(i_col, i)
         put(j_col, j)
         put(k_col, k)
-        if total_col:
-            put(total_col, total)
 
         if not pending:
             return

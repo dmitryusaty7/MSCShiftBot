@@ -463,7 +463,6 @@ async def confirm_save(message: types.Message, state: FSMContext) -> None:
         i=data.get("i", 0),
         j=data.get("j", 0),
         k=data.get("k", 0),
-        total=data.get("total", 0),
     )
     await state.clear()
     await message.answer("раздел «расходы смены» сохранён ✅")
