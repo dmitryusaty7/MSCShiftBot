@@ -107,6 +107,20 @@ def holds_kb() -> types.ReplyKeyboardMarkup:
     return keyboard.as_markup(resize_keyboard=True)
 
 
+def ship_choices_kb(ships: list[str]) -> types.ReplyKeyboardMarkup:
+    """Клавиатура с подсказками судов и кнопками навигации."""
+
+    keyboard = ReplyKeyboardBuilder()
+    for name in ships:
+        keyboard.button(text=name)
+    keyboard.button(text=BTN_BACK)
+    keyboard.button(text=BTN_HOME)
+    row_sizes = [1] * len(ships)
+    row_sizes.append(2)
+    keyboard.adjust(*row_sizes)
+    return keyboard.as_markup(resize_keyboard=True)
+
+
 @router.message(Command("expenses"))
 async def start_expenses(message: types.Message, state: FSMContext) -> None:
     """Запускает сценарий заполнения раздела расходов."""
@@ -128,12 +142,22 @@ async def ask_ship(message: types.Message, state: FSMContext) -> None:
 
     service = _get_service()
     ships = await asyncio.to_thread(service.get_active_ships)
-    await state.update_data(_ships=ships)
+    await state.update_data(_ships=ships, _candidate=None)
     await state.set_state(ExpenseFSM.ship)
-    await message.answer(
-        "введите название судна или его начальные буквы.",
-        reply_markup=nav_kb(),
-    )
+    suggestions = ships[:10]
+    if suggestions:
+        prompt = (
+            "выберите судно из списка ниже или начните ввод названия.\n"
+            "если нужного судна нет, бот предложит добавить его в таблицу."
+        )
+        markup = ship_choices_kb(suggestions)
+    else:
+        prompt = (
+            "введите название судна. если его нет в списке,"
+            " бот предложит добавить новое."
+        )
+        markup = nav_kb()
+    await message.answer(prompt, reply_markup=markup)
 
 
 @router.message(ExpenseFSM.ship)
@@ -160,16 +184,10 @@ async def ship_input(message: types.Message, state: FSMContext) -> None:
         return await ask_holds(message, state)
 
     if len(matches) > 1:
-        keyboard = ReplyKeyboardBuilder()
-        for candidate in matches[:10]:
-            keyboard.button(text=candidate)
-        keyboard.adjust(1)
-        keyboard.button(text=BTN_BACK)
-        keyboard.button(text=BTN_HOME)
-        keyboard.adjust(1, 2)
+        keyboard = ship_choices_kb(matches[:10])
         await message.answer(
             "нашлось несколько вариантов, выберите:",
-            reply_markup=keyboard.as_markup(resize_keyboard=True),
+            reply_markup=keyboard,
         )
         return
 

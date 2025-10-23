@@ -502,10 +502,8 @@ class SheetsService:
         ship_col = getattr(self, "DATA_COL_SHIP", DATA_COL_SHIP)
         status_col = getattr(self, "DATA_COL_STATUS", DATA_COL_STATUS)
 
-        ship_values = retry(
-            lambda: ws_data.col_values(self._col_to_index(ship_col))
-        )
-        next_row = max(len(ship_values) + 1, 2)
+        last_row = self._last_nonempty_row_in_column(ws_data, ship_col)
+        next_row = max(last_row + 1, 2)
 
         ship_clean = ship_name.strip()
         spreadsheet = self._get_spreadsheet(sid)
@@ -643,6 +641,19 @@ class SheetsService:
                 }
             )
         )
+
+    def _last_nonempty_row_in_column(
+        self, worksheet: gspread.Worksheet, column_letter: str
+    ) -> int:
+        """Возвращает номер последней непустой строки в указанном столбце."""
+
+        values = retry(
+            lambda: worksheet.col_values(self._col_to_index(column_letter))
+        )
+        for index in range(len(values), 0, -1):
+            if str(values[index - 1]).strip():
+                return index
+        return 1
 
     def get_shift_row_index_for_user(
         self, telegram_id: int, spreadsheet_id: Optional[str] = None
