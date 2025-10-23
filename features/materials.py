@@ -174,8 +174,8 @@ async def ask_photos_intro(message: types.Message, state: FSMContext) -> None:
     keyboard.button(text=BTN_HOME)
     keyboard.adjust(2, 2)
     await message.answer(
-        "📸 прикрепите фото крепления. можно загрузить несколько файлов подряд.\n"
-        f"после завершения нажмите «{BTN_CONFIRM}».",
+        "📸 Прикрепите фото крепления. Можно загрузить несколько файлов подряд.\n"
+        f"После завершения нажмите «{BTN_CONFIRM}».",
         reply_markup=keyboard.as_markup(resize_keyboard=True),
     )
 
@@ -210,38 +210,44 @@ async def confirm_upload(message: types.Message, state: FSMContext) -> None:
     user_id = data["user_id"]
     row = data["row"]
     photo_ids: list[str] = data.get("photo_ids", [])
+    if not photo_ids:
+        await message.answer("Добавьте хотя бы одно фото перед подтверждением.")
+        return
+
     try:
         drive = _get_drive_service()
     except Exception as exc:  # pragma: no cover - ошибка зависит от окружения
         logger.exception("Не удалось инициализировать DriveService: %s", exc)
         await message.answer(
-            "Не получилось подключиться к Google Drive. "
-            "Убедитесь, что установлены зависимости и заданы переменные окружения."
+            "Не получилось подключиться к Google Drive. Проверьте конфигурацию и повторите попытку."
         )
         return
 
     sheets = _get_sheets_service()
 
     try:
-        day = dt.date.today().isoformat()
-        folder_name = f"{day}_row{row}_uid{user_id}"
-        folder_id = await asyncio.to_thread(drive.create_folder, folder_name)
+        folder_id = await asyncio.to_thread(drive.create_daily_folder)
+        links: list[str] = []
 
-        if photo_ids:
-            for index, file_id in enumerate(photo_ids, start=1):
-                telegram_file = await message.bot.get_file(file_id)
-                downloaded = await message.bot.download_file(telegram_file.file_path)
-                payload = downloaded.read() if hasattr(downloaded, "read") else downloaded
-                await asyncio.to_thread(
-                    drive.upload_bytes,
-                    folder_id,
-                    f"photo_{index}.jpg",
-                    payload,
-                    "image/jpeg",
-                )
+        for index, file_id in enumerate(photo_ids, start=1):
+            telegram_file = await message.bot.get_file(file_id)
+            downloaded = await message.bot.download_file(telegram_file.file_path)
+            payload = downloaded.read() if hasattr(downloaded, "read") else downloaded
+            timestamp = dt.datetime.now().strftime("%H%M%S_%f")
+            filename = f"photo_{timestamp}_{index}.jpg"
+            link = await asyncio.to_thread(
+                drive.upload_photo,
+                folder_id,
+                payload,
+                filename,
+            )
+            if link:
+                links.append(link)
 
-        await asyncio.to_thread(drive.set_anyone_reader, folder_id)
-        link = await asyncio.to_thread(drive.web_link, folder_id)
+        if not links:
+            raise RuntimeError("Google Drive не вернул ссылки на загруженные фото")
+
+        links_text = "\n".join(links)
 
         await asyncio.to_thread(
             sheets.save_materials_block,
@@ -249,7 +255,10 @@ async def confirm_upload(message: types.Message, state: FSMContext) -> None:
             pvd_m=data.get("pvd", 0),
             pvc_pcs=data.get("pvc", 0),
             tape_pcs=data.get("tape", 0),
-            folder_link=link,
+            folder_link=links_text,
+        )
+        logger.info(
+            "Материалы сохранены: user_id=%s, row=%s, фото=%s", user_id, row, len(photo_ids)
         )
     except Exception as exc:  # pragma: no cover - зависит от внешних сервисов
         logger.exception("Ошибка при сохранении материалов: %s", exc)
@@ -259,7 +268,7 @@ async def confirm_upload(message: types.Message, state: FSMContext) -> None:
         )
         return
 
-    await message.answer("раздел «материалы» сохранён ✅")
+    await message.answer("Фото успешно загружены и сохранены в отчёте.")
     await state.clear()
     await _render_shift_menu(message, user_id, row)
 
