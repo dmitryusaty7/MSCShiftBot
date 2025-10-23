@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from aiogram import Router, types
+from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 
 from features.utils.locks import acquire_user_lock, release_user_lock
@@ -151,6 +152,9 @@ async def render_shift_menu(
     )
 
 
+from features.expenses import start_expenses
+
+
 @router.message(lambda msg: msg.text == BTN_BACK)
 async def back_to_main(message: types.Message) -> None:
     """Возвращает пользователя в основное меню."""
@@ -162,11 +166,10 @@ async def back_to_main(message: types.Message) -> None:
 
 
 @router.message(lambda msg: msg.text.startswith(BTN_EXPENSES_LABEL))
-async def go_expenses(message: types.Message) -> None:
-    """Заглушка раздела «Расходы» до подключения сценария."""
+async def go_expenses(message: types.Message, state: FSMContext) -> None:
+    """Переходит в сценарий заполнения раздела «Расходы»."""
 
-    await safe_delete(message)
-    await message.answer("раздел «расходы» подключим следующим этапом.")
+    await start_expenses(message, state)
 
 
 @router.message(lambda msg: msg.text.startswith(BTN_MATERIALS_LABEL))

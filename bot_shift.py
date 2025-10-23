@@ -11,6 +11,7 @@ from pathlib import Path
 from aiogram import Bot, Dispatcher
 from dotenv import load_dotenv
 
+from features.expenses import router as expenses_router
 from features.main_menu import router as main_menu_router
 from features.shift_menu import router as shift_menu_router
 from features.registration import router as registration_router
@@ -27,6 +28,7 @@ def main() -> None:
     dispatcher = Dispatcher()
     dispatcher.include_router(registration_router)
     dispatcher.include_router(main_menu_router)
+    dispatcher.include_router(expenses_router)
     dispatcher.include_router(shift_menu_router)
     dispatcher.run_polling(bot)
 

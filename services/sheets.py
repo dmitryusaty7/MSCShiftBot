@@ -17,6 +17,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import date, datetime
+from itertools import zip_longest
 from typing import Any, Callable, Optional, Tuple, TypeVar
 
 import gspread
@@ -42,6 +43,17 @@ SHEET_CREW = "Состав бригады"
 EXPENSES_COL_DATE = "A"
 EXPENSES_COL_TG = "B"
 
+EXP_COL_SHIP = "C"
+EXP_COL_HOLDS = "D"
+EXP_COL_E = "E"
+EXP_COL_F = "F"
+EXP_COL_G = "G"
+EXP_COL_H = "H"
+EXP_COL_I = "I"
+EXP_COL_J = "J"
+EXP_COL_K = "K"
+EXP_COL_TOTAL = "L"
+
 MATERIALS_COL_TG = "B"
 
 CREW_COL_TG = "B"
@@ -50,6 +62,8 @@ CREW_COL_FIO = "E"
 DATA_COL_TG = "A"
 DATA_COL_FIO = "E"
 DATA_COL_CLOSED_SHIFTS = "F"
+DATA_COL_SHIP = "H"
+DATA_COL_STATUS = "I"
 
 # пользовательские столбцы, которые нужно заполнить вручную
 EXPENSES_USER_COLS = [chr(code) for code in range(ord("C"), ord("L") + 1)]
@@ -193,6 +207,18 @@ class SheetsService:
     EXPENSES_USER_COLS = EXPENSES_USER_COLS
     MATERIALS_USER_COLS = MATERIALS_USER_COLS
     CREW_USER_COLS = CREW_USER_COLS
+    EXP_COL_SHIP = EXP_COL_SHIP
+    EXP_COL_HOLDS = EXP_COL_HOLDS
+    EXP_COL_E = EXP_COL_E
+    EXP_COL_F = EXP_COL_F
+    EXP_COL_G = EXP_COL_G
+    EXP_COL_H = EXP_COL_H
+    EXP_COL_I = EXP_COL_I
+    EXP_COL_J = EXP_COL_J
+    EXP_COL_K = EXP_COL_K
+    EXP_COL_TOTAL = EXP_COL_TOTAL
+    DATA_COL_SHIP = DATA_COL_SHIP
+    DATA_COL_STATUS = DATA_COL_STATUS
 
     def __init__(self) -> None:
         self.client = get_client()
@@ -436,6 +462,69 @@ class SheetsService:
             fio_compact=fio_compact,
         )
 
+    def get_active_ships(
+        self, spreadsheet_id: Optional[str] = None
+    ) -> list[str]:
+        """Возвращает список активных судов из листа «Данные»."""
+
+        sid = spreadsheet_id or require_env("SPREADSHEET_ID")
+        ws_data = self._get_worksheet(SHEET_DATA, sid)
+        ship_col = getattr(self, "DATA_COL_SHIP", DATA_COL_SHIP)
+        status_col = getattr(self, "DATA_COL_STATUS", DATA_COL_STATUS)
+
+        ship_values = retry(
+            lambda: ws_data.col_values(self._col_to_index(ship_col))
+        )
+        status_values = retry(
+            lambda: ws_data.col_values(self._col_to_index(status_col))
+        )
+
+        result: list[str] = []
+        for name, status in zip_longest(
+            ship_values[1:], status_values[1:], fillvalue=""
+        ):
+            clean_name = (name or "").strip()
+            if not clean_name:
+                continue
+            clean_status = (status or "").strip().lower()
+            if clean_status == "архив":
+                continue
+            result.append(clean_name)
+        return result
+
+    def add_ship(
+        self, ship_name: str, spreadsheet_id: Optional[str] = None
+    ) -> None:
+        """Добавляет новое судно в конец списка и помечает как активное."""
+
+        sid = spreadsheet_id or require_env("SPREADSHEET_ID")
+        ws_data = self._get_worksheet(SHEET_DATA, sid)
+        ship_col = getattr(self, "DATA_COL_SHIP", DATA_COL_SHIP)
+        status_col = getattr(self, "DATA_COL_STATUS", DATA_COL_STATUS)
+
+        ship_values = retry(
+            lambda: ws_data.col_values(self._col_to_index(ship_col))
+        )
+        next_row = max(len(ship_values) + 1, 2)
+
+        ship_clean = ship_name.strip()
+        spreadsheet = self._get_spreadsheet(sid)
+        updates = [
+            {
+                "range": f"{ws_data.title}!{ship_col}{next_row}",
+                "values": [[ship_clean]],
+            },
+            {
+                "range": f"{ws_data.title}!{status_col}{next_row}",
+                "values": [["Активен"]],
+            },
+        ]
+        retry(
+            lambda: spreadsheet.values_batch_update(
+                {"valueInputOption": "USER_ENTERED", "data": updates}
+            )
+        )
+
     def open_shift_for_user(
         self, telegram_id: int, spreadsheet_id: Optional[str] = None
     ) -> int:
@@ -485,6 +574,75 @@ class SheetsService:
             )
         )
         return target_row
+
+    def save_expenses_block(
+        self,
+        telegram_id: int,
+        row: int,
+        spreadsheet_id: Optional[str] = None,
+        *,
+        ship: str | None = None,
+        holds: int | None = None,
+        e: int | None = None,
+        f: int | None = None,
+        g: int | None = None,
+        h: int | None = None,
+        i: int | None = None,
+        j: int | None = None,
+        k: int | None = None,
+        total: int | None = None,
+    ) -> None:
+        """Сохраняет указанные поля в листе «Расходы смены» для строки смены."""
+
+        sid = spreadsheet_id or require_env("SPREADSHEET_ID")
+        ws_expenses = self._get_worksheet(SHEET_EXPENSES, sid)
+        logger.info(
+            "Сохранение блока расходов: user_id=%s, row=%s", telegram_id, row
+        )
+
+        ship_col = getattr(self, "EXP_COL_SHIP", EXP_COL_SHIP)
+        holds_col = getattr(self, "EXP_COL_HOLDS", EXP_COL_HOLDS)
+        e_col = getattr(self, "EXP_COL_E", EXP_COL_E)
+        f_col = getattr(self, "EXP_COL_F", EXP_COL_F)
+        g_col = getattr(self, "EXP_COL_G", EXP_COL_G)
+        h_col = getattr(self, "EXP_COL_H", EXP_COL_H)
+        i_col = getattr(self, "EXP_COL_I", EXP_COL_I)
+        j_col = getattr(self, "EXP_COL_J", EXP_COL_J)
+        k_col = getattr(self, "EXP_COL_K", EXP_COL_K)
+        total_col = getattr(self, "EXP_COL_TOTAL", EXP_COL_TOTAL)
+
+        pending: list[tuple[str, list[list[Any]]]] = []
+
+        def put(column: str, value: Any) -> None:
+            if value is not None:
+                pending.append((f"{ws_expenses.title}!{column}{row}", [[value]]))
+
+        put(ship_col, ship)
+        put(holds_col, holds)
+        put(e_col, e)
+        put(f_col, f)
+        put(g_col, g)
+        put(h_col, h)
+        put(i_col, i)
+        put(j_col, j)
+        put(k_col, k)
+        put(total_col, total)
+
+        if not pending:
+            return
+
+        spreadsheet = self._get_spreadsheet(sid)
+        retry(
+            lambda: spreadsheet.values_batch_update(
+                {
+                    "valueInputOption": "USER_ENTERED",
+                    "data": [
+                        {"range": cell_range, "values": values}
+                        for cell_range, values in pending
+                    ],
+                }
+            )
+        )
 
     def get_shift_row_index_for_user(
         self, telegram_id: int, spreadsheet_id: Optional[str] = None
