@@ -27,11 +27,22 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8276005298:AAEHrKe_dJuU__H_Lz_br7vvaBAl_OfmN7w")
-SPREADSHEET_ID = os.getenv(
-    "SPREADSHEET_ID", "1Hen1og8dtPl0L_zeBqSTZBXOpr0KJ0T2BKVbu5Ae2FM"
-)
-SERVICE_ACCOUNT_JSON_PATH = os.getenv("SERVICE_ACCOUNT_JSON_PATH", "./service_account.json")
+
+def _require_env(name: str) -> str:
+    """Возвращает значение обязательной переменной окружения."""
+
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            "Отсутствует обязательная переменная окружения "
+            f"{name}. Проверьте настройки `.env`."
+        )
+    return value
+
+
+BOT_TOKEN = _require_env("BOT_TOKEN")
+SPREADSHEET_ID = _require_env("SPREADSHEET_ID")
+SERVICE_ACCOUNT_JSON_PATH = _require_env("SERVICE_ACCOUNT_JSON_PATH")
 
 
 logging.basicConfig(level=logging.INFO)

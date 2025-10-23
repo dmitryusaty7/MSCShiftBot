@@ -15,8 +15,8 @@ Telegram-бот для управления сменами MSC Baltic.
    source .venv/bin/activate
    pip install -r requirements.txt
    ```
-3. Сохраните JSON-файл сервисного аккаунта Google в корне проекта (по умолчанию ожидается `service_account.json`).
-4. Выдайте сервисному аккаунту права «Редактор» для таблицы Google: `https://docs.google.com/spreadsheets/d/1Hen1og8dtPl0L_zeBqSTZBXOpr0KJ0T2BKVbu5Ae2FM/edit`.
+3. Сохраните JSON-файл сервисного аккаунта Google и укажите путь к нему в переменной `SERVICE_ACCOUNT_JSON_PATH` (можно положить файл в корень проекта и прописать `./service_account.json`).
+4. Выдайте сервисному аккаунту права «Редактор» для таблицы Google и сохраните её идентификатор в `SPREADSHEET_ID`.
 5. Скопируйте файл `.env.example` и заполните его своими значениями (или экспортируйте переменные вручную):
    ```bash
    cp .env.example .env
