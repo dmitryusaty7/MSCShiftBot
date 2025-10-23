@@ -25,13 +25,21 @@ from aiogram.types import (CallbackQuery, InlineKeyboardButton,
 from src.sheets_service import SheetsService
 from dotenv import load_dotenv
 
+
+def _require_env(var_name: str) -> str:
+    value = os.getenv(var_name)
+    if not value:
+        raise RuntimeError(
+            f"Не установлена обязательная переменная окружения '{var_name}'."
+        )
+    return value
+
+
 load_dotenv()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8276005298:AAEHrKe_dJuU__H_Lz_br7vvaBAl_OfmN7w")
-SPREADSHEET_ID = os.getenv(
-    "SPREADSHEET_ID", "1Hen1og8dtPl0L_zeBqSTZBXOpr0KJ0T2BKVbu5Ae2FM"
-)
-SERVICE_ACCOUNT_JSON_PATH = os.getenv("SERVICE_ACCOUNT_JSON_PATH", "./service_account.json")
+BOT_TOKEN = _require_env("BOT_TOKEN")
+SPREADSHEET_ID = _require_env("SPREADSHEET_ID")
+SERVICE_ACCOUNT_JSON_PATH = _require_env("SERVICE_ACCOUNT_JSON_PATH")
 
 
 logging.basicConfig(level=logging.INFO)
