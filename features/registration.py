@@ -1,23 +1,33 @@
+"""FSM регистрации пользователей."""
+
 from __future__ import annotations
-
-"""FSM регистрации пользователей.
-
-Логика реализует пошаговое заполнение ФИО и запись данных в лист «Данные».
-"""
-
-import os
 
 from aiogram import F, Router, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
+from services.env import require_env
 from services.sheets import SheetsService, validate_name_piece
 
 router = Router()
-service = SheetsService()
 
-SPREADSHEET_ID = os.environ["SPREADSHEET_ID"]
+_service: SheetsService | None = None
+
+
+def _get_service() -> SheetsService:
+    """Ленивая инициализация сервиса работы с Google Sheets."""
+
+    global _service
+    if _service is None:
+        _service = SheetsService()
+    return _service
+
+
+def _get_spreadsheet_id() -> str:
+    """Возвращает идентификатор таблицы из окружения."""
+
+    return require_env("SPREADSHEET_ID")
 
 
 class RegStates(StatesGroup):
@@ -51,10 +61,21 @@ async def cmd_start(message: types.Message, state: FSMContext) -> None:
 
     user_id = message.from_user.id
 
+    service = _get_service()
+    spreadsheet_id = _get_spreadsheet_id()
+
     try:
-        row, status = service.find_row_by_telegram_id(SPREADSHEET_ID, user_id)
-    except Exception:
-        row, status = None, None
+        row, status = service.find_row_by_telegram_id(spreadsheet_id, user_id)
+    except PermissionError:
+        await message.answer(
+            "Ваш доступ заблокирован. Обратитесь к координатору для уточнения статуса."
+        )
+        return
+    except Exception:  # noqa: BLE001
+        await message.answer(
+            "Не удалось проверить регистрацию. Попробуйте повторить попытку позже."
+        )
+        return
 
     if row and status != "Архив":
         await message.answer("Добро пожаловать! Вы уже зарегистрированы. Открываю панель.")
@@ -66,14 +87,15 @@ async def cmd_start(message: types.Message, state: FSMContext) -> None:
 
     await state.clear()
     await state.set_state(RegStates.last)
-    await message.answer("Введите вашу Фамилию (только буквы).")
+    await message.answer("Введите вашу Фамилию (только буквы).", reply_markup=types.ReplyKeyboardRemove())
 
 
 @router.message(RegStates.last)
 async def reg_last(message: types.Message, state: FSMContext) -> None:
-    ok, value = validate_name_piece(message.text or "")
-    if not ok:
-        await message.answer(f"Некорректная фамилия: {value}")
+    try:
+        value = validate_name_piece(message.text or "")
+    except ValueError as error:
+        await message.answer(f"Некорректная фамилия: {error}")
         return
 
     await state.update_data(last=value)
@@ -83,9 +105,10 @@ async def reg_last(message: types.Message, state: FSMContext) -> None:
 
 @router.message(RegStates.first)
 async def reg_first(message: types.Message, state: FSMContext) -> None:
-    ok, value = validate_name_piece(message.text or "")
-    if not ok:
-        await message.answer(f"Некорректное имя: {value}")
+    try:
+        value = validate_name_piece(message.text or "")
+    except ValueError as error:
+        await message.answer(f"Некорректное имя: {error}")
         return
 
     await state.update_data(first=value)
@@ -104,9 +127,10 @@ async def reg_middle_skip(message: types.Message, state: FSMContext) -> None:
 
 @router.message(RegStates.middle)
 async def reg_middle(message: types.Message, state: FSMContext) -> None:
-    ok, value = validate_name_piece(message.text or "")
-    if not ok:
-        await message.answer(f"Некорректное отчество: {value}")
+    try:
+        value = validate_name_piece(message.text or "")
+    except ValueError as error:
+        await message.answer(f"Некорректное отчество: {error}")
         return
 
     await state.update_data(middle=value)
@@ -141,7 +165,10 @@ async def reg_save(message: types.Message, state: FSMContext) -> None:
     middle = data.get("middle", "")
     user_id = message.from_user.id
 
-    if service.fio_duplicate_exists(SPREADSHEET_ID, last, first, middle):
+    service = _get_service()
+    spreadsheet_id = _get_spreadsheet_id()
+
+    if service.fio_duplicate_exists(spreadsheet_id, last, first, middle):
         await message.answer(
             "Пользователь с таким ФИО уже зарегистрирован. Уточните данные или обратитесь к координатору."
         )
@@ -149,7 +176,7 @@ async def reg_save(message: types.Message, state: FSMContext) -> None:
 
     try:
         service.upsert_registration_row(
-            spreadsheet_id=SPREADSHEET_ID,
+            spreadsheet_id=spreadsheet_id,
             telegram_id=user_id,
             last=last,
             first=first,
@@ -158,8 +185,8 @@ async def reg_save(message: types.Message, state: FSMContext) -> None:
     except PermissionError:
         await message.answer("Ваш доступ отключён. Обратитесь к координатору.")
         return
-    except Exception as exc:  # noqa: BLE001
-        await message.answer(f"Ошибка сохранения: {exc}")
+    except Exception:  # noqa: BLE001
+        await message.answer("Временная ошибка при сохранении. Попробуйте позже.")
         return
 
     await state.clear()

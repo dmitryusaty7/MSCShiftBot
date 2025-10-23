@@ -6,19 +6,18 @@ from __future__ import annotations
 сюда будут добавляться новые роутеры.
 """
 
-import os
-
 from aiogram import Bot, Dispatcher
 from dotenv import load_dotenv
 
 from features.registration import router as registration_router
+from services.env import require_env
 
 
 def main() -> None:
     """Запускает бота."""
 
     load_dotenv()
-    bot = Bot(token=os.environ["BOT_TOKEN"])
+    bot = Bot(token=require_env("BOT_TOKEN"))
     dispatcher = Dispatcher()
     dispatcher.include_router(registration_router)
     dispatcher.run_polling(bot)
