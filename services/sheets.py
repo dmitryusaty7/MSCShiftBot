@@ -15,11 +15,15 @@ import logging
 import os
 import re
 import time
+from dataclasses import dataclass
+from datetime import date
 from typing import Callable, Optional, Tuple, TypeVar
 
 import gspread
 from gspread.exceptions import APIError
 from google.oauth2.service_account import Credentials
+
+from services.env import require_env
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +34,31 @@ SCOPES = [
 ]
 
 _NAME_RE = re.compile(r"^[A-Za-zА-Яа-яЁё\- ]{1,50}$")
+SHEET_DATA = DATA_SHEET_NAME
+SHEET_EXPENSES = "Расходы смены"
+SHEET_MATERIALS = "Материалы"
+SHEET_CREW = "Состав бригады"
+
+EXPENSES_COL_DATE = "A"
+EXPENSES_COL_TG = "B"
+
+MATERIALS_COL_TG = "B"
+
+CREW_COL_TG = "B"
+CREW_COL_FIO = "E"
+
+DATA_COL_TG = "A"
+DATA_COL_FIO = "E"
+DATA_COL_CLOSED_SHIFTS = "F"
+
 T = TypeVar("T")
+
+
+@dataclass
+class UserProfile:
+    telegram_id: int
+    fio: str
+    closed_shifts: int
 
 
 def retry(func: Callable[[], T], tries: int = 3, backoff: float = 0.5) -> T:
@@ -116,17 +144,37 @@ class SheetsService:
 
     def __init__(self) -> None:
         self.client = get_client()
+        self._spreadsheet_cache: dict[str, gspread.Spreadsheet] = {}
+        self._worksheet_cache: dict[tuple[str, str], gspread.Worksheet] = {}
 
     def ws(self, spreadsheet_id: str, sheet_name: str = DATA_SHEET_NAME) -> gspread.Worksheet:
         """Возвращает рабочий лист."""
 
-        def _get_ws() -> gspread.Worksheet:
-            spreadsheet = self.client.open_by_key(spreadsheet_id)
-            return spreadsheet.worksheet(sheet_name)
-
-        worksheet = retry(_get_ws)
+        worksheet = self._get_worksheet(sheet_name, spreadsheet_id)
         logger.info("Открыт лист %s (таблица %s)", worksheet.title, spreadsheet_id)
         return worksheet
+
+    def _get_spreadsheet(self, spreadsheet_id: Optional[str] = None) -> gspread.Spreadsheet:
+        """Возвращает объект таблицы с кэшированием."""
+
+        sid = spreadsheet_id or require_env("SPREADSHEET_ID")
+        if sid not in self._spreadsheet_cache:
+            self._spreadsheet_cache[sid] = retry(lambda: self.client.open_by_key(sid))
+        return self._spreadsheet_cache[sid]
+
+    def _get_worksheet(
+        self, sheet_name: str, spreadsheet_id: Optional[str] = None
+    ) -> gspread.Worksheet:
+        """Возвращает рабочий лист с кэшированием."""
+
+        sid = spreadsheet_id or require_env("SPREADSHEET_ID")
+        cache_key = (sid, sheet_name)
+        if cache_key not in self._worksheet_cache:
+            spreadsheet = self._get_spreadsheet(sid)
+            self._worksheet_cache[cache_key] = retry(
+                lambda: spreadsheet.worksheet(sheet_name)
+            )
+        return self._worksheet_cache[cache_key]
 
     # ---------- Регистрация на листе «Данные» ----------
 
@@ -225,3 +273,137 @@ class SheetsService:
             )
         )
         return row_index
+
+    # ---------- Работа с рабочими листами смен ----------
+
+    def get_user_profile(
+        self, telegram_id: int, spreadsheet_id: Optional[str] = None
+    ) -> UserProfile:
+        """Возвращает профиль пользователя из листа «Данные» по Telegram ID."""
+
+        sid = spreadsheet_id or require_env("SPREADSHEET_ID")
+        ws_data = self._get_worksheet(SHEET_DATA, sid)
+        row = self._find_user_row_in_data(ws_data, telegram_id)
+        if not row:
+            raise RuntimeError("пользователь не найден в листе «Данные»")
+
+        fio_cell = retry(lambda: ws_data.acell(f"{DATA_COL_FIO}{row}"))
+        closed_cell = retry(lambda: ws_data.acell(f"{DATA_COL_CLOSED_SHIFTS}{row}"))
+
+        fio = (fio_cell.value or "").strip()
+        closed_raw = (closed_cell.value or "").strip()
+        try:
+            closed = int(closed_raw)
+        except ValueError:
+            closed = 0
+
+        return UserProfile(telegram_id=telegram_id, fio=fio, closed_shifts=closed)
+
+    def open_shift_for_user(
+        self, telegram_id: int, spreadsheet_id: Optional[str] = None
+    ) -> int:
+        """Готовит синхронизированную строку смены во всех рабочих листах."""
+
+        sid = spreadsheet_id or require_env("SPREADSHEET_ID")
+        profile = self.get_user_profile(telegram_id, sid)
+        target_row = self._compute_target_row_for_user(telegram_id, sid)
+        today = date.today().isoformat()
+
+        batch = [
+            {
+                "range": f"{SHEET_EXPENSES}!{EXPENSES_COL_DATE}{target_row}",
+                "values": [[today]],
+            },
+            {
+                "range": f"{SHEET_EXPENSES}!{EXPENSES_COL_TG}{target_row}",
+                "values": [[str(telegram_id)]],
+            },
+            {
+                "range": f"{SHEET_MATERIALS}!{MATERIALS_COL_TG}{target_row}",
+                "values": [[str(telegram_id)]],
+            },
+            {
+                "range": f"{SHEET_CREW}!{CREW_COL_TG}{target_row}",
+                "values": [[str(telegram_id)]],
+            },
+            {
+                "range": f"{SHEET_CREW}!{CREW_COL_FIO}{target_row}",
+                "values": [[profile.fio]],
+            },
+        ]
+
+        spreadsheet = self._get_spreadsheet(sid)
+        retry(
+            lambda: spreadsheet.values_batch_update(
+                {"valueInputOption": "USER_ENTERED", "data": batch}
+            )
+        )
+        return target_row
+
+    def _compute_target_row_for_user(
+        self, telegram_id: int, spreadsheet_id: Optional[str] = None
+    ) -> int:
+        """Определяет целевую строку оформления смены."""
+
+        sid = spreadsheet_id or require_env("SPREADSHEET_ID")
+        ws_expenses = self._get_worksheet(SHEET_EXPENSES, sid)
+        ws_materials = self._get_worksheet(SHEET_MATERIALS, sid)
+        ws_crew = self._get_worksheet(SHEET_CREW, sid)
+
+        last_by_user = [
+            self._last_row_with_tg(ws_expenses, EXPENSES_COL_TG, telegram_id),
+            self._last_row_with_tg(ws_materials, MATERIALS_COL_TG, telegram_id),
+            self._last_row_with_tg(ws_crew, CREW_COL_TG, telegram_id),
+        ]
+        filtered = [row for row in last_by_user if row]
+        if filtered:
+            return max(filtered) + 1
+
+        last_global = [
+            self._last_nonempty_row(ws_expenses),
+            self._last_nonempty_row(ws_materials),
+            self._last_nonempty_row(ws_crew),
+        ]
+        return max(last_global) + 1
+
+    def _find_user_row_in_data(
+        self, worksheet: gspread.Worksheet, telegram_id: int
+    ) -> Optional[int]:
+        """Ищет строку пользователя в листе «Данные» по Telegram ID."""
+
+        column = retry(
+            lambda: worksheet.col_values(self._col_to_index(DATA_COL_TG))
+        )
+        for index, value in enumerate(column[1:], start=2):
+            if str(value).strip() == str(telegram_id):
+                return index
+        return None
+
+    @staticmethod
+    def _col_to_index(letter: str) -> int:
+        """Преобразует обозначение колонки (A, B, ...) в номер."""
+
+        return ord(letter.upper()) - ord("A") + 1
+
+    def _last_nonempty_row(self, worksheet: gspread.Worksheet) -> int:
+        """Возвращает индекс последней непустой строки по колонке A."""
+
+        column = retry(lambda: worksheet.col_values(1))
+        for index in range(len(column), 0, -1):
+            if str(column[index - 1]).strip():
+                return index
+        return 1
+
+    def _last_row_with_tg(
+        self, worksheet: gspread.Worksheet, column_letter: str, telegram_id: int
+    ) -> Optional[int]:
+        """Возвращает последнюю строку пользователя по колонке с Telegram ID."""
+
+        column = retry(
+            lambda: worksheet.col_values(self._col_to_index(column_letter))
+        )
+        last: Optional[int] = None
+        for index, value in enumerate(column[1:], start=2):
+            if str(value).strip() == str(telegram_id):
+                last = index
+        return last
