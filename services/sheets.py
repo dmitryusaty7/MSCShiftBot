@@ -59,6 +59,7 @@ class UserProfile:
     telegram_id: int
     fio: str
     closed_shifts: int
+    fio_compact: str = ""
 
 
 def retry(func: Callable[[], T], tries: int = 3, backoff: float = 0.5) -> T:
@@ -407,9 +408,10 @@ class SheetsService:
 
         first = (first_cell.value or "").strip()
         middle = (middle_cell.value or "").strip()
+        fio_compact = (fio_cell.value or "").strip()
         fio = format_display_name(first, middle)
         if not fio:
-            fio = (fio_cell.value or "").strip()
+            fio = fio_compact
         if not fio:
             fio = str(telegram_id)
         closed_raw = (closed_cell.value or "").strip()
@@ -418,7 +420,12 @@ class SheetsService:
         except ValueError:
             closed = 0
 
-        return UserProfile(telegram_id=telegram_id, fio=fio, closed_shifts=closed)
+        return UserProfile(
+            telegram_id=telegram_id,
+            fio=fio,
+            closed_shifts=closed,
+            fio_compact=fio_compact,
+        )
 
     def open_shift_for_user(
         self, telegram_id: int, spreadsheet_id: Optional[str] = None
@@ -449,7 +456,7 @@ class SheetsService:
             },
             {
                 "range": f"{SHEET_CREW}!{CREW_COL_FIO}{target_row}",
-                "values": [[profile.fio]],
+                "values": [[profile.fio_compact or profile.fio]],
             },
         ]
 
