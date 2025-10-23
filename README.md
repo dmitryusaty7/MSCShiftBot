@@ -1,4 +1,4 @@
-# mcs shiftbot
+# mcsshiftbot
 
 > telegram-бот для учёта смен, материалов и расходов проекта msc baltic  
 > деплой в два шага, api на steroids, работает через google sheets + fsm core
