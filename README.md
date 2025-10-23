@@ -10,6 +10,7 @@ telegram-бот для учёта смен, материалов и расход
 - telegram bot token
 - service account json для google sheets с правами editor
 - доступ к целевой google sheet (id в .env)
+- OAuth-токен Yandex Disk с правами на папку приложения
 
 ---
 
@@ -34,7 +35,7 @@ python -m pip install -r requirements.txt
 ```
 
 помести `service_account.json` в корень проекта. не коммить файл. добавь в .gitignore.
-скопируй `.env.example` → `.env` и заполни: `BOT_TOKEN`, `SPREADSHEET_ID`, `SERVICE_ACCOUNT_JSON_PATH` (можно оставить старое имя `GOOGLE_SERVICE_ACCOUNT_JSON_PATH`, но рекомендуется перейти на новое).
+скопируй `.env.example` → `.env` и заполни: `BOT_TOKEN`, `SPREADSHEET_ID`, `SERVICE_ACCOUNT_JSON_PATH` (можно оставить старое имя `GOOGLE_SERVICE_ACCOUNT_JSON_PATH`, но рекомендуется перейти на новое), а также параметры `DRIVE_PROVIDER`, `YADISK_OAUTH_TOKEN`, `YADISK_ROOT_FOLDER`.
 
 ---
 
@@ -73,6 +74,19 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run_bot.ps1
 - запись данных в sheet: лист `дaнные` (диапазон a:g)
 - отдельные модули для расходов, материалов, состава бригады
 - sheets_service — единый интерфейс к google sheets
+
+---
+
+## хранилище материалов
+
+Бот сохраняет фотографии материалов в приватное хранилище Yandex Disk (режим `app_folder`).
+
+1. Создайте OAuth-токен в [мастере Яндекс.Диска](https://oauth.yandex.ru/authorize) с правом `disk.app_folder`.
+2. Убедитесь, что токен относится к нужному аккаунту. Доступна только папка приложения, публичные ссылки не формируются.
+3. В `.env` задайте `DRIVE_PROVIDER=yadisk`, `YADISK_OAUTH_TOKEN=<ваш токен>`, при необходимости переименуйте корневую папку через `YADISK_ROOT_FOLDER`.
+4. После запуска бота файлы будут складываться по пути `app:/<root>/<дата>/row_<row>_uid_<user>`. Путь записывается в таблицу Google Sheets для дальнейшего доступа администратором.
+
+Если загрузка материалов завершилась ошибкой, проверьте срок действия токена и наличие прав на папку приложения.
 
 ---
 

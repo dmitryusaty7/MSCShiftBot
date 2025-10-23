@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+import os
 import re
+import tempfile
 from typing import TYPE_CHECKING
 
 from aiogram import F, Router, types
@@ -15,8 +17,9 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 
 from features.utils.messaging import safe_delete
-from services.drive import DriveService
 from services.sheets import SheetsService
+from services.storage import get_storage
+from services.yadisk import YandexDiskApiError, YandexDriveService
 
 if TYPE_CHECKING:  # pragma: no cover
     from features.shift_menu import render_shift_menu as RenderShiftMenuFn
@@ -24,7 +27,7 @@ if TYPE_CHECKING:  # pragma: no cover
 router = Router()
 logger = logging.getLogger(__name__)
 _sheets_service: SheetsService | None = None
-_drive_service: DriveService | None = None
+_storage_service: YandexDriveService | None = None
 
 
 def _get_sheets_service() -> SheetsService:
@@ -36,13 +39,13 @@ def _get_sheets_service() -> SheetsService:
     return _sheets_service
 
 
-def _get_drive_service() -> DriveService:
-    """Ленивая инициализация сервиса Google Drive."""
+def _get_storage_service() -> YandexDriveService:
+    """Ленивая инициализация хранилища материалов."""
 
-    global _drive_service
-    if _drive_service is None:
-        _drive_service = DriveService()
-    return _drive_service
+    global _storage_service
+    if _storage_service is None:
+        _storage_service = get_storage()
+    return _storage_service
 
 
 def _render_shift_menu(*args, **kwargs):
@@ -103,7 +106,31 @@ async def start_materials(message: types.Message, state: FSMContext) -> None:
     row = await asyncio.to_thread(sheets.get_shift_row_index_for_user, user_id)
     if row is None:
         row = await asyncio.to_thread(sheets.open_shift_for_user, user_id)
-    await state.update_data(user_id=user_id, row=row, photo_ids=[])
+
+    day_dir = dt.date.today().strftime("%Y-%m-%d")
+    folder_relative = f"{day_dir}/row_{row}_uid_{user_id}"
+
+    try:
+        storage = _get_storage_service()
+        folder_api_path = await asyncio.to_thread(storage.ensure_folder, folder_relative)
+    except (YandexDiskApiError, RuntimeError, ValueError) as exc:
+        logger.exception("Не удалось подготовить папку для материалов: %s", exc)
+        await message.answer(
+            "Не удалось подготовить хранилище материалов. Проверьте настройки токена "
+            "и попробуйте позже или обратитесь к администратору."
+        )
+        await state.clear()
+        await _render_shift_menu(message, user_id, row)
+        return
+
+    await state.update_data(
+        user_id=user_id,
+        row=row,
+        photo_ids=[],
+        day_dir=day_dir,
+        folder_relative=folder_relative,
+        folder_api_path=folder_api_path,
+    )
     await ask_pvd(message, state)
 
 
@@ -214,40 +241,42 @@ async def confirm_upload(message: types.Message, state: FSMContext) -> None:
         await message.answer("Добавьте хотя бы одно фото перед подтверждением.")
         return
 
+    sheets = _get_sheets_service()
     try:
-        drive = _get_drive_service()
-    except Exception as exc:  # pragma: no cover - ошибка зависит от окружения
-        logger.exception("Не удалось инициализировать DriveService: %s", exc)
+        storage = _get_storage_service()
+    except Exception as exc:  # pragma: no cover - зависит от окружения
+        logger.exception("Не удалось инициализировать сервис хранения: %s", exc)
         await message.answer(
-            "Не получилось подключиться к Google Drive. Проверьте конфигурацию и повторите попытку."
+            "Не удалось подготовить хранилище материалов. Проверьте переменные окружения и повторите попытку."
         )
         return
 
-    sheets = _get_sheets_service()
-
     try:
-        folder_id = await asyncio.to_thread(drive.create_daily_folder)
-        links: list[str] = []
+        folder_api_path: str = data["folder_api_path"]
+        uploaded: list[str] = []
 
         for index, file_id in enumerate(photo_ids, start=1):
             telegram_file = await message.bot.get_file(file_id)
             downloaded = await message.bot.download_file(telegram_file.file_path)
-            payload = downloaded.read() if hasattr(downloaded, "read") else downloaded
-            timestamp = dt.datetime.now().strftime("%H%M%S_%f")
-            filename = f"photo_{timestamp}_{index}.jpg"
-            link = await asyncio.to_thread(
-                drive.upload_photo,
-                folder_id,
-                payload,
-                filename,
-            )
-            if link:
-                links.append(link)
+            tmp_file = _write_temp_file(downloaded)
+            timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            filename = f"photo_{timestamp}_{index:03d}.jpg"
+            file_api_path = f"{folder_api_path}/{filename}"
+            try:
+                info = await asyncio.to_thread(
+                    storage.upload_file,
+                    file_api_path,
+                    tmp_file,
+                    "image/jpeg",
+                )
+            finally:
+                _safe_remove(tmp_file)
+            uploaded.append(info.get("name", filename))
 
-        if not links:
-            raise RuntimeError("Google Drive не вернул ссылки на загруженные фото")
+        if not uploaded:
+            raise RuntimeError("Не удалось загрузить ни одного файла в хранилище")
 
-        links_text = "\n".join(links)
+        folder_info = f"{folder_api_path}\n" + "\n".join(uploaded)
 
         await asyncio.to_thread(
             sheets.save_materials_block,
@@ -255,16 +284,27 @@ async def confirm_upload(message: types.Message, state: FSMContext) -> None:
             pvd_m=data.get("pvd", 0),
             pvc_pcs=data.get("pvc", 0),
             tape_pcs=data.get("tape", 0),
-            folder_link=links_text,
+            folder_link=folder_info,
         )
         logger.info(
             "Материалы сохранены: user_id=%s, row=%s, фото=%s", user_id, row, len(photo_ids)
         )
+    except YandexDiskApiError as exc:  # pragma: no cover - зависит от внешних сервисов
+        logger.exception("Ошибка API Yandex Disk при сохранении материалов: %s", exc)
+        if exc.status in {401, 403}:
+            await message.answer(
+                "Токен Яндекс.Диска недействителен или нет доступа к папке приложения. "
+                "Проверьте переменные окружения и токен в .env."
+            )
+        else:
+            await message.answer(
+                "Не удалось загрузить материалы в хранилище. Попробуйте позже или обратитесь к администратору."
+            )
+        return
     except Exception as exc:  # pragma: no cover - зависит от внешних сервисов
-        logger.exception("Ошибка при сохранении материалов: %s", exc)
+        logger.exception("Неизвестная ошибка при сохранении материалов: %s", exc)
         await message.answer(
-            "Не удалось загрузить материалы в Google Drive. Попробуйте позже "
-            "или обратитесь к администратору."
+            "Не удалось загрузить материалы в хранилище. Попробуйте позже или обратитесь к администратору."
         )
         return
 
@@ -288,3 +328,33 @@ async def exit_nav(message: types.Message, state: FSMContext, key: str) -> None:
 
         return await show_menu(message)
     await _render_shift_menu(message, data.get("user_id"), data.get("row"))
+
+
+def _write_temp_file(downloaded) -> str:
+    try:
+        if hasattr(downloaded, "read"):
+            content = downloaded.read()
+        else:
+            content = downloaded
+    finally:
+        close = getattr(downloaded, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:  # pragma: no cover - best effort
+                logger.debug("Не удалось закрыть поток загруженного файла", exc_info=True)
+    if isinstance(content, str):
+        content = content.encode()
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+    try:
+        tmp.write(content)
+    finally:
+        tmp.close()
+    return tmp.name
+
+
+def _safe_remove(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        logger.debug("Не удалось удалить временный файл %s", path)
