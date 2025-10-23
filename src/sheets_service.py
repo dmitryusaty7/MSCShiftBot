@@ -10,7 +10,10 @@ import asyncio
 import json
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
+
+import base64
+import os
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -31,14 +34,77 @@ class ShiftRowInfo:
     crew_row: int
 
 
+def _load_service_account_from_path(path: str) -> Dict[str, Any]:
+    """Читает файл service_account.json и возвращает словарь с данными."""
+
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _load_service_account_from_env(
+    json_env_var: str = "GOOGLE_SERVICE_ACCOUNT_JSON",
+    base64_env_var: str = "GOOGLE_SERVICE_ACCOUNT_JSON_BASE64",
+) -> Dict[str, Any]:
+    """Получает данные сервисного аккаунта из переменных окружения."""
+
+    raw_json = os.getenv(json_env_var)
+    if raw_json:
+        return json.loads(raw_json)
+
+    raw_base64 = os.getenv(base64_env_var)
+    if raw_base64:
+        decoded = base64.b64decode(raw_base64)
+        return json.loads(decoded.decode("utf-8"))
+
+    raise RuntimeError(
+        "Не удалось найти данные сервисного аккаунта: "
+        f"установите {json_env_var} или {base64_env_var}"
+    )
+
+
+def load_service_account_info(
+    service_account_path: Optional[str] = None,
+    json_env_var: str = "GOOGLE_SERVICE_ACCOUNT_JSON",
+    base64_env_var: str = "GOOGLE_SERVICE_ACCOUNT_JSON_BASE64",
+) -> Dict[str, Any]:
+    """Загружает настройки сервисного аккаунта из файла или окружения."""
+
+    if service_account_path:
+        return _load_service_account_from_path(service_account_path)
+
+    return _load_service_account_from_env(json_env_var, base64_env_var)
+
+
+def build_credentials(service_account_info: Dict[str, Any]) -> Credentials:
+    """Создаёт объект Credentials для работы с Google API."""
+
+    return Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
+
+
 class SheetsService:
     """Обертка над gspread для работы с таблицами проекта."""
 
-    def __init__(self, spreadsheet_id: str, service_account_path: str) -> None:
+    def __init__(self, spreadsheet_id: str, credentials: Credentials) -> None:
         self._spreadsheet_id = spreadsheet_id
-        with open(service_account_path, "r", encoding="utf-8") as f:
-            info = json.load(f)
-        self._credentials = Credentials.from_service_account_info(info, scopes=SCOPES)
+        self._credentials = credentials
+
+    @classmethod
+    def from_service_account(
+        cls,
+        spreadsheet_id: str,
+        service_account_path: Optional[str] = None,
+        json_env_var: str = "GOOGLE_SERVICE_ACCOUNT_JSON",
+        base64_env_var: str = "GOOGLE_SERVICE_ACCOUNT_JSON_BASE64",
+    ) -> "SheetsService":
+        """Создаёт сервис, используя файл или переменные окружения."""
+
+        info = load_service_account_info(
+            service_account_path=service_account_path,
+            json_env_var=json_env_var,
+            base64_env_var=base64_env_var,
+        )
+        credentials = build_credentials(info)
+        return cls(spreadsheet_id=spreadsheet_id, credentials=credentials)
 
     def _get_client(self) -> gspread.Client:
         return gspread.authorize(self._credentials)
