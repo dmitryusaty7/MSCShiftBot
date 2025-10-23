@@ -186,8 +186,9 @@ async def go_materials(message: types.Message, state: FSMContext) -> None:
 
 
 @router.message(lambda msg: msg.text.startswith(BTN_CREW_LABEL))
-async def go_crew(message: types.Message) -> None:
-    """Заглушка раздела «Бригада» до подключения сценария."""
+async def go_crew(message: types.Message, state: FSMContext) -> None:
+    """Переходит в сценарий заполнения раздела «Бригада»."""
 
-    await safe_delete(message)
-    await message.answer("раздел «бригада» подключим следующим этапом.")
+    from features.crew import start_crew
+
+    await start_crew(message, state)

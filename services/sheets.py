@@ -62,7 +62,8 @@ MAT_COL_TAPE_PCS = "J"
 MAT_COL_FOLDER_LINK = "N"
 
 CREW_COL_TG = "B"
-CREW_COL_FIO = "E"
+CREW_COL_DRIVER = "E"
+CREW_COL_WORKERS = "F"
 
 DATA_COL_TG = "A"
 DATA_COL_FIO = "E"
@@ -73,7 +74,7 @@ DATA_COL_STATUS = "I"
 # пользовательские столбцы, которые нужно заполнить вручную
 EXPENSES_USER_COLS = [chr(code) for code in range(ord("C"), ord("L") + 1)]
 MATERIALS_USER_COLS = ["A"] + [chr(code) for code in range(ord("C"), ord("N") + 1)]
-CREW_USER_COLS = ["A", "C", "D", "F", "G"]
+CREW_USER_COLS = [CREW_COL_TG, CREW_COL_DRIVER, CREW_COL_WORKERS]
 
 T = TypeVar("T")
 
@@ -546,7 +547,6 @@ class SheetsService:
         """Готовит синхронизированную строку смены во всех рабочих листах."""
 
         sid = spreadsheet_id or require_env("SPREADSHEET_ID")
-        profile = self.get_user_profile(telegram_id, sid)
         ws_expenses = self._get_worksheet(SHEET_EXPENSES, sid)
         today_date = date.today()
         existing_row = self._find_today_row_for_user(
@@ -576,11 +576,21 @@ class SheetsService:
                 "range": f"{SHEET_CREW}!{CREW_COL_TG}{target_row}",
                 "values": [[str(telegram_id)]],
             },
-            {
-                "range": f"{SHEET_CREW}!{CREW_COL_FIO}{target_row}",
-                "values": [[profile.fio_compact or profile.fio]],
-            },
         ]
+
+        if existing_row is None:
+            batch.extend(
+                [
+                    {
+                        "range": f"{SHEET_CREW}!{CREW_COL_DRIVER}{target_row}",
+                        "values": [[""]],
+                    },
+                    {
+                        "range": f"{SHEET_CREW}!{CREW_COL_WORKERS}{target_row}",
+                        "values": [[""]],
+                    },
+                ]
+            )
 
         spreadsheet = self._get_spreadsheet(sid)
         retry(
@@ -698,6 +708,194 @@ class SheetsService:
             )
         )
 
+    def _list_directory_records(
+        self,
+        name_column: str,
+        status_column: str,
+        spreadsheet_id: Optional[str] = None,
+    ) -> list[tuple[str, str]]:
+        """Возвращает пары (имя, статус) из колонок справочника на листе «Данные».
+
+        Пустые строки игнорируются, значения обрезаются по краям.
+        """
+
+        ws_data = self._get_worksheet(SHEET_DATA, spreadsheet_id)
+        range_label = f"{name_column}2:{status_column}"
+        values = retry(lambda: ws_data.get(range_label))
+
+        records: list[tuple[str, str]] = []
+        for row in values:
+            if not row:
+                continue
+            name = str(row[0]).strip() if len(row) >= 1 else ""
+            status = str(row[1]).strip() if len(row) >= 2 else ""
+            if name:
+                records.append((name, status))
+        return records
+
+    def list_active_drivers(
+        self, spreadsheet_id: Optional[str] = None
+    ) -> list[str]:
+        """Возвращает список активных водителей в порядке следования в таблице."""
+
+        records = self._list_directory_records("J", "K", spreadsheet_id)
+        result: list[str] = []
+        seen: set[str] = set()
+        for name, status in records:
+            if status.strip().lower() == "архив":
+                continue
+            key = name.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(name)
+        return result
+
+    def list_active_workers(
+        self, spreadsheet_id: Optional[str] = None
+    ) -> list[str]:
+        """Возвращает список активных рабочих."""
+
+        records = self._list_directory_records("L", "M", spreadsheet_id)
+        result: list[str] = []
+        seen: set[str] = set()
+        for name, status in records:
+            if status.strip().lower() == "архив":
+                continue
+            key = name.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(name)
+        return result
+
+    def _directory_status(
+        self,
+        name: str,
+        name_column: str,
+        status_column: str,
+        spreadsheet_id: Optional[str] = None,
+    ) -> Optional[str]:
+        """Возвращает статус записи по имени или ``None``, если запись не найдена."""
+
+        name_key = name.casefold()
+        for existing, status in self._list_directory_records(
+            name_column, status_column, spreadsheet_id
+        ):
+            if existing.casefold() == name_key:
+                return status or "Активен"
+        return None
+
+    def get_driver_status(
+        self, name: str, spreadsheet_id: Optional[str] = None
+    ) -> Optional[str]:
+        """Возвращает статус водителя или ``None``, если его нет в таблице."""
+
+        return self._directory_status(name, "J", "K", spreadsheet_id)
+
+    def get_worker_status(
+        self, name: str, spreadsheet_id: Optional[str] = None
+    ) -> Optional[str]:
+        """Возвращает статус рабочего или ``None``, если запись не найдена."""
+
+        return self._directory_status(name, "L", "M", spreadsheet_id)
+
+    def add_driver(
+        self, name: str, spreadsheet_id: Optional[str] = None
+    ) -> None:
+        """Добавляет нового водителя со статусом «Активен» в лист «Данные».
+
+        Запись добавляется в первый свободный ряд соответствующих колонок.
+        """
+
+        sid = spreadsheet_id or require_env("SPREADSHEET_ID")
+        ws_data = self._get_worksheet(SHEET_DATA, sid)
+        next_row = max(self._last_nonempty_row_in_column(ws_data, "J") + 1, 2)
+        spreadsheet = self._get_spreadsheet(sid)
+        updates = [
+            {
+                "range": f"{ws_data.title}!J{next_row}",
+                "values": [[name.strip()]],
+            },
+            {
+                "range": f"{ws_data.title}!K{next_row}",
+                "values": [["Активен"]],
+            },
+        ]
+        retry(
+            lambda: spreadsheet.values_batch_update(
+                {"valueInputOption": "USER_ENTERED", "data": updates}
+            )
+        )
+
+    def add_worker(
+        self, name: str, spreadsheet_id: Optional[str] = None
+    ) -> None:
+        """Добавляет нового рабочего со статусом «Активен» в лист «Данные»."""
+
+        sid = spreadsheet_id or require_env("SPREADSHEET_ID")
+        ws_data = self._get_worksheet(SHEET_DATA, sid)
+        next_row = max(self._last_nonempty_row_in_column(ws_data, "L") + 1, 2)
+        spreadsheet = self._get_spreadsheet(sid)
+        updates = [
+            {
+                "range": f"{ws_data.title}!L{next_row}",
+                "values": [[name.strip()]],
+            },
+            {
+                "range": f"{ws_data.title}!M{next_row}",
+                "values": [["Активен"]],
+            },
+        ]
+        retry(
+            lambda: spreadsheet.values_batch_update(
+                {"valueInputOption": "USER_ENTERED", "data": updates}
+            )
+        )
+
+    def save_crew(
+        self,
+        row: int,
+        *,
+        driver: str,
+        workers: list[str],
+        telegram_id: int | None = None,
+        spreadsheet_id: Optional[str] = None,
+    ) -> None:
+        """Сохраняет выбранного водителя и список рабочих для строки смены."""
+
+        sid = spreadsheet_id or require_env("SPREADSHEET_ID")
+        ws_crew = self._get_worksheet(SHEET_CREW, sid)
+        spreadsheet = self._get_spreadsheet(sid)
+
+        workers_clean = [worker.strip() for worker in workers if worker.strip()]
+        workers_value = "; ".join(workers_clean)
+
+        updates: list[dict[str, object]] = [
+            {
+                "range": f"{ws_crew.title}!{CREW_COL_DRIVER}{row}",
+                "values": [[driver.strip()]],
+            },
+            {
+                "range": f"{ws_crew.title}!{CREW_COL_WORKERS}{row}",
+                "values": [[workers_value]],
+            },
+        ]
+
+        if telegram_id is not None:
+            updates.append(
+                {
+                    "range": f"{ws_crew.title}!{CREW_COL_TG}{row}",
+                    "values": [[str(telegram_id)]],
+                }
+            )
+
+        retry(
+            lambda: spreadsheet.values_batch_update(
+                {"valueInputOption": "USER_ENTERED", "data": updates}
+            )
+        )
+
     def materials_all_filled(
         self, row: int, spreadsheet_id: Optional[str] = None
     ) -> bool:
@@ -730,6 +928,35 @@ class SheetsService:
             return bool(re.fullmatch(r"\d+", value))
 
         return is_num(h_val) and is_num(i_val) and is_num(j_val) and bool(n_val)
+
+    def crew_all_filled(
+        self, row: int, spreadsheet_id: Optional[str] = None
+    ) -> bool:
+        """Возвращает ``True``, если в строке выбраны водитель и хотя бы один рабочий."""
+
+        ws = self._get_worksheet(SHEET_CREW, spreadsheet_id)
+        ranges = [
+            f"{CREW_COL_DRIVER}{row}:{CREW_COL_DRIVER}{row}",
+            f"{CREW_COL_WORKERS}{row}:{CREW_COL_WORKERS}{row}",
+        ]
+        cells = retry(
+            lambda: ws.batch_get(ranges, value_render_option="UNFORMATTED_VALUE")
+        )
+
+        def extract(block: list[list[Any]] | list[Any]) -> str:
+            if not block:
+                return ""
+            first_row = block[0] if isinstance(block[0], list) else block
+            if not first_row:
+                return ""
+            return str(first_row[0]).strip()
+
+        values = [extract(block) for block in cells]
+        while len(values) < 2:
+            values.append("")
+
+        driver_value, workers_value = values
+        return bool(driver_value) and bool(workers_value)
 
     def _last_nonempty_row_in_column(
         self, worksheet: gspread.Worksheet, column_letter: str
@@ -801,15 +1028,13 @@ class SheetsService:
 
         sid = spreadsheet_id or require_env("SPREADSHEET_ID")
         ws_expenses = self._get_worksheet(SHEET_EXPENSES, sid)
-        ws_crew = self._get_worksheet(SHEET_CREW, sid)
 
         expenses_cols = getattr(self, "EXPENSES_USER_COLS", EXPENSES_USER_COLS)
-        crew_cols = getattr(self, "CREW_USER_COLS", CREW_USER_COLS)
 
         return {
             "expenses": self._row_all_filled(ws_expenses, row, expenses_cols),
             "materials": self.materials_all_filled(row, sid),
-            "crew": self._row_all_filled(ws_crew, row, crew_cols),
+            "crew": self.crew_all_filled(row, sid),
         }
 
     def _compute_target_row_for_user(
