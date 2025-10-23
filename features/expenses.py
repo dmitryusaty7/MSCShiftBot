@@ -141,6 +141,10 @@ async def ship_input(message: types.Message, state: FSMContext) -> None:
     """Обрабатывает ввод названия судна и выбор из предложенных вариантов."""
 
     text = message.text.strip()
+    if text.startswith("Добавить: "):
+        # Обработка нажатия кнопки «Добавить: …» должна сработать даже при
+        # повторном вызове базового хэндлера из-за порядка регистрации.
+        return await add_ship(message, state)
     if text in (BTN_BACK, BTN_HOME):
         await safe_delete(message)
         return await exit_by_nav(message, state, text)
