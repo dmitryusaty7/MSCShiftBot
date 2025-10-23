@@ -1,4 +1,5 @@
 python-dotenv
 gspread
 google-auth
+google-api-python-client
 aiogram==3.*
