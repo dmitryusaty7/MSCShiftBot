@@ -56,6 +56,11 @@ EXP_COL_TOTAL = "L"
 
 MATERIALS_COL_TG = "B"
 
+MAT_COL_PVD_M = "H"
+MAT_COL_PVC_PCS = "I"
+MAT_COL_TAPE_PCS = "J"
+MAT_COL_FOLDER_LINK = "N"
+
 CREW_COL_TG = "B"
 CREW_COL_FIO = "E"
 
@@ -224,6 +229,18 @@ class SheetsService:
         self.client = get_client()
         self._spreadsheet_cache: dict[str, gspread.Spreadsheet] = {}
         self._worksheet_cache: dict[tuple[str, str], gspread.Worksheet] = {}
+
+    @property
+    def spreadsheet(self) -> gspread.Spreadsheet:
+        """Возвращает таблицу из настроек по умолчанию."""
+
+        return self._get_spreadsheet()
+
+    @property
+    def ws_materials(self) -> gspread.Worksheet:
+        """Возвращает лист «Материалы» из таблицы по умолчанию."""
+
+        return self._get_worksheet(SHEET_MATERIALS)
 
     def ws(self, spreadsheet_id: str, sheet_name: str = DATA_SHEET_NAME) -> gspread.Worksheet:
         """Возвращает рабочий лист."""
@@ -642,6 +659,78 @@ class SheetsService:
             )
         )
 
+    def save_materials_block(
+        self,
+        row: int,
+        spreadsheet_id: Optional[str] = None,
+        *,
+        pvd_m: int | None = None,
+        pvc_pcs: int | None = None,
+        tape_pcs: int | None = None,
+        folder_link: str | None = None,
+    ) -> None:
+        """Сохраняет блок материалов для строки смены."""
+
+        ws = self._get_worksheet(SHEET_MATERIALS, spreadsheet_id)
+        updates: list[dict[str, object]] = []
+
+        def put(column: str, value: Any) -> None:
+            if value is not None:
+                updates.append(
+                    {
+                        "range": f"{ws.title}!{column}{row}",
+                        "values": [[value]],
+                    }
+                )
+
+        put(MAT_COL_PVD_M, pvd_m)
+        put(MAT_COL_PVC_PCS, pvc_pcs)
+        put(MAT_COL_TAPE_PCS, tape_pcs)
+        put(MAT_COL_FOLDER_LINK, folder_link)
+
+        if not updates:
+            return
+
+        spreadsheet = self._get_spreadsheet(spreadsheet_id)
+        retry(
+            lambda: spreadsheet.values_batch_update(
+                {"valueInputOption": "USER_ENTERED", "data": updates}
+            )
+        )
+
+    def materials_all_filled(
+        self, row: int, spreadsheet_id: Optional[str] = None
+    ) -> bool:
+        """Проверяет заполнение всех обязательных полей материалов."""
+
+        ws = self._get_worksheet(SHEET_MATERIALS, spreadsheet_id)
+        ranges = [
+            f"{col}{row}:{col}{row}"
+            for col in (MAT_COL_PVD_M, MAT_COL_PVC_PCS, MAT_COL_TAPE_PCS, MAT_COL_FOLDER_LINK)
+        ]
+        cells = retry(
+            lambda: ws.batch_get(ranges, value_render_option="UNFORMATTED_VALUE")
+        )
+
+        def extract(block: list[list[Any]] | list[Any]) -> str:
+            if not block:
+                return ""
+            first_row = block[0] if isinstance(block[0], list) else block
+            if not first_row:
+                return ""
+            return str(first_row[0]).strip()
+
+        values = [extract(block) for block in cells]
+        while len(values) < 4:
+            values.append("")
+
+        h_val, i_val, j_val, n_val = values
+
+        def is_num(value: str) -> bool:
+            return bool(re.fullmatch(r"\d+", value))
+
+        return is_num(h_val) and is_num(i_val) and is_num(j_val) and bool(n_val)
+
     def _last_nonempty_row_in_column(
         self, worksheet: gspread.Worksheet, column_letter: str
     ) -> int:
@@ -712,16 +801,14 @@ class SheetsService:
 
         sid = spreadsheet_id or require_env("SPREADSHEET_ID")
         ws_expenses = self._get_worksheet(SHEET_EXPENSES, sid)
-        ws_materials = self._get_worksheet(SHEET_MATERIALS, sid)
         ws_crew = self._get_worksheet(SHEET_CREW, sid)
 
         expenses_cols = getattr(self, "EXPENSES_USER_COLS", EXPENSES_USER_COLS)
-        materials_cols = getattr(self, "MATERIALS_USER_COLS", MATERIALS_USER_COLS)
         crew_cols = getattr(self, "CREW_USER_COLS", CREW_USER_COLS)
 
         return {
             "expenses": self._row_all_filled(ws_expenses, row, expenses_cols),
-            "materials": self._row_all_filled(ws_materials, row, materials_cols),
+            "materials": self.materials_all_filled(row, sid),
             "crew": self._row_all_filled(ws_crew, row, crew_cols),
         }
 
