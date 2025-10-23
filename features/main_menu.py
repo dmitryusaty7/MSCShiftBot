@@ -20,6 +20,7 @@ def _get_service() -> SheetsService:
         _service = SheetsService()
     return _service
 
+
 START_SHIFT_BTN = "🚀 Начать оформление смены"
 
 
