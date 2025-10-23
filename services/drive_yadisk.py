@@ -107,7 +107,7 @@ class YaDiskService:
         absolute = self._absolute_path(folder_path)
         disk_path = self._to_disk_path(absolute)
         response = self._request(
-            "post",
+            "put",
             "/resources/publish",
             params={"path": disk_path},
             allow={200, 202, 409},
@@ -204,17 +204,26 @@ class YaDiskService:
         method: str,
         path: str,
         *,
+        params: dict | None = None,
+        headers: dict | None = None,
         allow: Iterable[int] | None = None,
         retries: int = 3,
         **kwargs,
     ) -> requests.Response:
         url = f"{_API_ROOT}{path}"
-        allowed = set(allow or {200})
+        allowed = {int(code) for code in (allow or {200})}
         attempt = 0
         while True:
             attempt += 1
             try:
-                response = self._session.request(method, url, timeout=30, **kwargs)
+                response = self._session.request(
+                    method,
+                    url,
+                    params=params,
+                    headers=headers,
+                    timeout=30,
+                    **kwargs,
+                )
             except requests.RequestException as exc:  # noqa: PERF203 - повторяем попытки
                 if attempt >= retries:
                     raise YaDiskError(0, "Сетевая ошибка", str(exc)) from exc
