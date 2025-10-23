@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from aiogram import F, Router, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -66,7 +68,9 @@ async def cmd_start(message: types.Message, state: FSMContext) -> None:
     spreadsheet_id = _get_spreadsheet_id()
 
     try:
-        row, status = service.find_row_by_telegram_id(spreadsheet_id, user_id)
+        row, status = await asyncio.to_thread(
+            service.find_row_by_telegram_id, spreadsheet_id, user_id
+        )
     except PermissionError:
         await message.answer(
             "Ваш доступ заблокирован. Обратитесь к координатору для уточнения статуса."
@@ -170,19 +174,22 @@ async def reg_save(message: types.Message, state: FSMContext) -> None:
     service = _get_service()
     spreadsheet_id = _get_spreadsheet_id()
 
-    if service.fio_duplicate_exists(spreadsheet_id, last, first, middle):
+    if await asyncio.to_thread(
+        service.fio_duplicate_exists, spreadsheet_id, last, first, middle
+    ):
         await message.answer(
             "Пользователь с таким ФИО уже зарегистрирован. Уточните данные или обратитесь к координатору."
         )
         return
 
     try:
-        service.upsert_registration_row(
-            spreadsheet_id=spreadsheet_id,
-            telegram_id=user_id,
-            last=last,
-            first=first,
-            middle=middle,
+        await asyncio.to_thread(
+            service.upsert_registration_row,
+            spreadsheet_id,
+            user_id,
+            last,
+            first,
+            middle,
         )
     except PermissionError:
         await message.answer("Ваш доступ отключён. Обратитесь к координатору.")

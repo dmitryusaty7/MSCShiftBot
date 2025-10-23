@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from aiogram import Router, types
@@ -113,7 +114,9 @@ async def render_shift_menu(
                 return
 
             try:
-                row_index = sheets.open_shift_for_user(user_id)
+                row_index = await asyncio.to_thread(
+                    sheets.open_shift_for_user, user_id
+                )
             except Exception:  # noqa: BLE001
                 logger.exception(
                     "Не удалось открыть строку смены (user_id=%s)", user_id
@@ -123,7 +126,9 @@ async def render_shift_menu(
                 )
                 return
 
-        progress = sheets.get_shift_progress(user_id, row_index)
+        progress = await asyncio.to_thread(
+            sheets.get_shift_progress, user_id, row_index
+        )
     except Exception:  # noqa: BLE001
         logger.exception("Не удалось получить прогресс смены (user_id=%s)", user_id)
         await message.answer(

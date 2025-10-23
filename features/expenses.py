@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
+from typing import TYPE_CHECKING
 
 from aiogram import F, Router, types
 from aiogram.filters import Command
@@ -12,7 +14,6 @@ from aiogram.utils.keyboard import ReplyKeyboardBuilder
 
 from features.utils.messaging import safe_delete
 from services.sheets import SheetsService
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover
     from features.shift_menu import render_shift_menu as RenderShiftMenuFn
@@ -113,9 +114,11 @@ async def start_expenses(message: types.Message, state: FSMContext) -> None:
     await safe_delete(message)
     user_id = message.from_user.id
     service = _get_service()
-    row = service.get_shift_row_index_for_user(user_id)
+    row = await asyncio.to_thread(
+        service.get_shift_row_index_for_user, user_id
+    )
     if row is None:
-        row = service.open_shift_for_user(user_id)
+        row = await asyncio.to_thread(service.open_shift_for_user, user_id)
     await state.update_data(row=row, user_id=user_id)
     await ask_ship(message, state)
 
@@ -124,7 +127,7 @@ async def ask_ship(message: types.Message, state: FSMContext) -> None:
     """Запрашивает название судна и предлагает варианты из списка."""
 
     service = _get_service()
-    ships = service.get_active_ships()
+    ships = await asyncio.to_thread(service.get_active_ships)
     await state.update_data(_ships=ships)
     await state.set_state(ExpenseFSM.ship)
     await message.answer(
@@ -196,7 +199,7 @@ async def add_ship(message: types.Message, state: FSMContext) -> None:
         await message.answer("повторите ввод названия судна.")
         return
     service = _get_service()
-    service.add_ship(candidate)
+    await asyncio.to_thread(service.add_ship, candidate)
     await state.update_data(ship=candidate)
     await safe_delete(message)
     await ask_holds(message, state)
@@ -425,9 +428,10 @@ async def confirm_save(message: types.Message, state: FSMContext) -> None:
     row = data["row"]
     user_id = data["user_id"]
     service = _get_service()
-    service.save_expenses_block(
-        telegram_id=user_id,
-        row=row,
+    await asyncio.to_thread(
+        service.save_expenses_block,
+        user_id,
+        row,
         ship=data.get("ship"),
         holds=data.get("holds"),
         e=data.get("e", 0),

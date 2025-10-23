@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from aiogram import Router, types
@@ -53,7 +54,9 @@ async def show_menu(
     )
 
     try:
-        profile: UserProfile = sheets.get_user_profile(user_id)
+        profile: UserProfile = await asyncio.to_thread(
+            sheets.get_user_profile, user_id
+        )
     except Exception:  # noqa: BLE001
         logger.exception("Не удалось получить профиль для меню (user_id=%s)", user_id)
         await safe_delete(progress_message)
@@ -102,7 +105,9 @@ async def start_shift(message: types.Message) -> None:
 
     try:
         try:
-            row_index = service.open_shift_for_user(user_id)
+            row_index = await asyncio.to_thread(
+                service.open_shift_for_user, user_id
+            )
         except Exception:  # noqa: BLE001
             logger.exception(
                 "Не удалось подготовить смену (user_id=%s)", user_id
