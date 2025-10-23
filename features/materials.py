@@ -323,7 +323,7 @@ async def confirm_upload(message: types.Message, state: FSMContext) -> None:
         )
         return
 
-    await message.answer(f"📎 фото сохранены. ссылка на папку: {public_url}")
+    await message.answer("📎 фото успешно загружены.")
     await state.clear()
     await _render_shift_menu(message, user_id, row)
 
