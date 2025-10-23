@@ -127,6 +127,48 @@ def validate_name_piece(raw_value: str) -> str:
     return normalize_name_piece(candidate)
 
 
+def _initial(value: str) -> str:
+    """Возвращает первую букву строки для инициалов."""
+
+    for char in value.strip():
+        if char.isalpha():
+            return char.upper()
+    return ""
+
+
+def format_compact_fio(last: str, first: str, middle: str) -> str:
+    """Формирует короткую запись ФИО вида «Фамилия И. О.» или «Фамилия И.»."""
+
+    pieces: list[str] = []
+    last_clean = last.strip()
+    if last_clean:
+        pieces.append(last_clean)
+
+    first_initial = _initial(first)
+    if first_initial:
+        pieces.append(f"{first_initial}.")
+
+    middle_initial = _initial(middle)
+    if middle_initial:
+        pieces.append(f"{middle_initial}.")
+
+    return " ".join(pieces).strip()
+
+
+def format_display_name(first: str, middle: str) -> str:
+    """Возвращает приветственное имя вида «Имя Отчество» или только «Имя»."""
+
+    first_clean = first.strip()
+    middle_clean = middle.strip()
+    if first_clean and middle_clean:
+        return f"{first_clean} {middle_clean}"
+    if first_clean:
+        return first_clean
+    if middle_clean:
+        return middle_clean
+    return ""
+
+
 def get_client() -> gspread.Client:
     """Создаёт gspread-клиент по данным сервисного аккаунта."""
 
@@ -284,10 +326,33 @@ class SheetsService:
                     raw_value = ""
 
                 if not (isinstance(raw_value, str) and raw_value.startswith("=")):
+                    processed_fio = format_compact_fio(last, first, middle)
+                    if processed_fio:
+                        updates.append(
+                            {
+                                "range": f"{sheet_name}!{DATA_COL_FIO}{row_index}",
+                                "values": [[processed_fio]],
+                            }
+                        )
+
+            if middle:
+                try:
+                    middle_cell = retry(
+                        lambda: worksheet.cell(
+                            row_index,
+                            self._col_to_index("D"),
+                            value_render_option="FORMULA",
+                        )
+                    )
+                    middle_raw = getattr(middle_cell, "value", "")
+                except Exception:  # noqa: BLE001
+                    middle_raw = ""
+
+                if not (isinstance(middle_raw, str) and middle_raw.startswith("=")):
                     updates.append(
                         {
-                            "range": f"{sheet_name}!{DATA_COL_FIO}{row_index}",
-                            "values": [[fio_full]],
+                            "range": f"{sheet_name}!D{row_index}",
+                            "values": [[middle]],
                         }
                     )
 
@@ -335,10 +400,18 @@ class SheetsService:
         if not row:
             raise RuntimeError("пользователь не найден в листе «Данные»")
 
+        first_cell = retry(lambda: ws_data.acell(f"C{row}"))
+        middle_cell = retry(lambda: ws_data.acell(f"D{row}"))
         fio_cell = retry(lambda: ws_data.acell(f"{DATA_COL_FIO}{row}"))
         closed_cell = retry(lambda: ws_data.acell(f"{DATA_COL_CLOSED_SHIFTS}{row}"))
 
-        fio = (fio_cell.value or "").strip()
+        first = (first_cell.value or "").strip()
+        middle = (middle_cell.value or "").strip()
+        fio = format_display_name(first, middle)
+        if not fio:
+            fio = (fio_cell.value or "").strip()
+        if not fio:
+            fio = str(telegram_id)
         closed_raw = (closed_cell.value or "").strip()
         try:
             closed = int(closed_raw)
