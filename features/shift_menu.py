@@ -317,7 +317,7 @@ def render_group_summary(brigadier: str, summary: dict[str, object]) -> str:
                 if str(item).strip()
             ]
             if cleaned:
-                workers_names = "; ".join(cleaned)
+                workers_names = ", ".join(cleaned)
 
     materials_line = (
         f"материалы: ПВД {pvd} м, ПВХ {pvc} шт, лента {tape} шт"
@@ -458,11 +458,18 @@ async def close_shift(message: types.Message) -> None:
 
     group_sent = False
     if notifications_enabled and group_id is not None:
-        brigadier_name = (
-            message.from_user.full_name
-            or message.from_user.username
-            or str(user_id)
-        )
+        crew_info = summary.get("crew") if isinstance(summary, dict) else None
+        brigadier_name = ""
+        if isinstance(crew_info, dict):
+            name_candidate = crew_info.get("driver")
+            if isinstance(name_candidate, str) and name_candidate.strip():
+                brigadier_name = name_candidate.strip()
+        if not brigadier_name:
+            brigadier_name = (
+                message.from_user.full_name
+                or message.from_user.username
+                or str(user_id)
+            )
         text = render_group_summary(brigadier_name, summary)
         try:
             await message.bot.send_message(

@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import socket
 import time
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -22,7 +23,10 @@ from typing import Any, Callable, Optional, Tuple, TypeVar
 
 import gspread
 from gspread.exceptions import APIError
+from google.auth.exceptions import TransportError
 from google.oauth2.service_account import Credentials
+from requests.exceptions import SSLError as RequestsSSLError
+from urllib3.exceptions import SSLError as Urllib3SSLError
 
 from services.env import require_env
 
@@ -52,8 +56,8 @@ EXP_COL_H = "H"
 EXP_COL_I = "I"
 EXP_COL_J = "J"
 EXP_COL_K = "K"
-EXP_COL_TOTAL = "L"
-EXP_COL_CLOSED_AT = "M"
+EXP_COL_TOTAL: str | None = None
+EXP_COL_CLOSED_AT = "L"
 
 MATERIALS_COL_TG = "B"
 
@@ -63,7 +67,7 @@ MAT_COL_TAPE_PCS = "J"
 MAT_COL_FOLDER_LINK = "N"
 
 CREW_COL_TG = "B"
-CREW_COL_DRIVER = "F"
+CREW_COL_DRIVER = "E"
 CREW_COL_WORKERS = "G"
 
 DATA_COL_TG = "A"
@@ -73,7 +77,7 @@ DATA_COL_SHIP = "H"
 DATA_COL_STATUS = "I"
 
 # пользовательские столбцы, которые нужно заполнить вручную
-EXPENSES_USER_COLS = [chr(code) for code in range(ord("C"), ord("L") + 1)]
+EXPENSES_USER_COLS = [chr(code) for code in range(ord("C"), ord("K") + 1)]
 MATERIALS_USER_COLS = ["A"] + [chr(code) for code in range(ord("C"), ord("N") + 1)]
 CREW_USER_COLS = [CREW_COL_TG, CREW_COL_DRIVER, CREW_COL_WORKERS]
 
@@ -109,8 +113,21 @@ def retry(func: Callable[[], T], tries: int = 3, backoff: float = 0.5) -> T:
             logger.warning(
                 "Повтор %s/%s после ошибки %s", attempt, tries, status or "без кода"
             )
-            time.sleep(backoff * attempt)
-            attempt += 1
+        except (
+            RequestsSSLError,
+            Urllib3SSLError,
+            socket.timeout,
+            TransportError,
+        ) as error:
+            if attempt >= tries:
+                logger.error("Ошибка соединения после %s попыток: %s", tries, error)
+                raise
+
+            logger.warning(
+                "Повтор %s/%s после сетевой ошибки: %s", attempt, tries, error
+            )
+        time.sleep(backoff * attempt)
+        attempt += 1
 
 
 def _norm_tid(value: object) -> str:
@@ -599,7 +616,47 @@ class SheetsService:
                 {"valueInputOption": "USER_ENTERED", "data": batch}
             )
         )
+        try:
+            self._ensure_brigadier_autofill(telegram_id, target_row, sid)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Не удалось автоматически заполнить бригадира (user_id=%s, row=%s)",
+                telegram_id,
+                target_row,
+            )
         return target_row
+
+    def _ensure_brigadier_autofill(
+        self, telegram_id: int, row: int, spreadsheet_id: Optional[str]
+    ) -> None:
+        """Записывает ФИО бригадира в лист «Состав бригады», если ячейка пуста."""
+
+        sid = spreadsheet_id or require_env("SPREADSHEET_ID")
+        ws_crew = self._get_worksheet(SHEET_CREW, sid)
+        cell = retry(lambda: ws_crew.acell(f"{CREW_COL_DRIVER}{row}"))
+        current_value = (cell.value or "").strip()
+        if current_value:
+            return
+
+        profile = self.get_user_profile(telegram_id, sid)
+        candidate = (profile.fio_compact or profile.fio or "").strip()
+        if not candidate:
+            return
+
+        spreadsheet = self._get_spreadsheet(sid)
+        retry(
+            lambda: spreadsheet.values_batch_update(
+                {
+                    "valueInputOption": "USER_ENTERED",
+                    "data": [
+                        {
+                            "range": f"{ws_crew.title}!{CREW_COL_DRIVER}{row}",
+                            "values": [[candidate]],
+                        }
+                    ],
+                }
+            )
+        )
 
     def save_expenses_block(
         self,
@@ -652,7 +709,8 @@ class SheetsService:
         put(i_col, i)
         put(j_col, j)
         put(k_col, k)
-        put(total_col, total)
+        if total_col:
+            put(total_col, total)
 
         if not pending:
             return
@@ -870,7 +928,7 @@ class SheetsService:
         spreadsheet = self._get_spreadsheet(sid)
 
         workers_clean = [worker.strip() for worker in workers if worker.strip()]
-        workers_value = "; ".join(workers_clean)
+        workers_value = ", ".join(workers_clean)
 
         updates: list[dict[str, object]] = [
             {
@@ -952,6 +1010,7 @@ class SheetsService:
                 digits = "".join(ch for ch in text if ch.isdigit() or ch == "-")
                 return int(digits) if digits else 0
 
+        total_column = getattr(self, "EXP_COL_TOTAL", EXP_COL_TOTAL)
         expenses_columns = [
             EXPENSES_COL_DATE,
             EXP_COL_SHIP,
@@ -963,8 +1022,10 @@ class SheetsService:
             EXP_COL_I,
             EXP_COL_J,
             EXP_COL_K,
-            EXP_COL_TOTAL,
         ]
+        include_total = bool(total_column)
+        if include_total and total_column not in expenses_columns:
+            expenses_columns.append(total_column)
         expenses_values = fetch_row(ws_expenses, expenses_columns)
 
         date_value = expenses_values[0]
@@ -986,7 +1047,12 @@ class SheetsService:
         food_cost = parse_int(expenses_values[7])
         taxi_cost = parse_int(expenses_values[8])
         other_cost = parse_int(expenses_values[9])
-        total_cost = parse_int(expenses_values[10])
+        total_raw = (
+            expenses_values[10]
+            if include_total and len(expenses_values) > 10
+            else None
+        )
+        total_cost = parse_int(total_raw) if total_raw is not None else 0
         if total_cost == 0:
             total_candidate = (
                 driver_cost
