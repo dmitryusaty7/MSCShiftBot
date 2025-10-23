@@ -34,7 +34,7 @@ python -m pip install -r requirements.txt
 ```
 
 помести `service_account.json` в корень проекта. не коммить файл. добавь в .gitignore.
-скопируй `.env.example` → `.env` и заполни: `bot_token`, `spreadsheet_id`, `service_account_json_path`.
+скопируй `.env.example` → `.env` и заполни: `BOT_TOKEN`, `SPREADSHEET_ID`, `SERVICE_ACCOUNT_JSON_PATH` (можно оставить старое имя `GOOGLE_SERVICE_ACCOUNT_JSON_PATH`, но рекомендуется перейти на новое).
 
 ---
 

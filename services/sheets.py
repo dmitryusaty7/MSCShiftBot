@@ -21,8 +21,6 @@ import gspread
 from gspread.exceptions import APIError
 from google.oauth2.service_account import Credentials
 
-from services.env import require_env
-
 logger = logging.getLogger(__name__)
 
 DATA_SHEET_NAME = os.getenv("DATA_SHEET_NAME", "Данные")
@@ -104,7 +102,11 @@ def validate_name_piece(raw_value: str) -> str:
 def get_client() -> gspread.Client:
     """Создаёт gspread-клиент по данным сервисного аккаунта."""
 
-    json_path = require_env("GOOGLE_SERVICE_ACCOUNT_JSON_PATH")
+    json_path = os.getenv("SERVICE_ACCOUNT_JSON_PATH") or os.getenv(
+        "GOOGLE_SERVICE_ACCOUNT_JSON_PATH"
+    )
+    if not json_path:
+        raise RuntimeError("SERVICE_ACCOUNT_JSON_PATH не задан")
     credentials = Credentials.from_service_account_file(json_path, scopes=SCOPES)
     return gspread.authorize(credentials)
 
