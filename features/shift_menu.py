@@ -1,14 +1,19 @@
-"""Меню оформления смены с отображением статуса разделов."""
+"""Меню оформления смены и статусы разделов."""
 
 from __future__ import annotations
+
+import logging
 
 from aiogram import Router, types
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 
+from features.utils.locks import acquire_user_lock, release_user_lock
+from features.utils.messaging import safe_delete, send_progress
 from services.sheets import SheetsService
 
 router = Router()
 _service: SheetsService | None = None
+logger = logging.getLogger(__name__)
 
 
 def _get_service() -> SheetsService:
@@ -77,17 +82,61 @@ async def render_shift_menu(
     user_id: int,
     row: int | None,
     service: SheetsService | None = None,
+    *,
+    delete_trigger_message: bool = True,
+    show_progress: bool = True,
 ) -> None:
     """Отображает меню смены, создавая строку при необходимости."""
 
     sheets = _resolve_service(service)
-    row_index = row
-    if row_index is None:
-        row_index = sheets.get_shift_row_index_for_user(user_id)
-        if row_index is None:
-            row_index = sheets.open_shift_for_user(user_id)
 
-    progress = sheets.get_shift_progress(user_id, row_index)
+    if delete_trigger_message:
+        await safe_delete(message)
+
+    progress_message = (
+        await send_progress(message, "⏳ Проверяю статус смены. Подождите…")
+        if show_progress
+        else None
+    )
+
+    row_index = row
+    progress: dict[str, bool] | None = None
+    lock = None
+    try:
+        if row_index is None:
+            lock = await acquire_user_lock(user_id)
+            if lock is None:
+                await message.answer(
+                    "Предыдущее действие ещё выполняется. Повторите попытку через несколько секунд."
+                )
+                return
+
+            try:
+                row_index = sheets.open_shift_for_user(user_id)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Не удалось открыть строку смены (user_id=%s)", user_id
+                )
+                await message.answer(
+                    "Не удалось подготовить смену. Попробуйте позже или обратитесь к координатору."
+                )
+                return
+
+        progress = sheets.get_shift_progress(user_id, row_index)
+    except Exception:  # noqa: BLE001
+        logger.exception("Не удалось получить прогресс смены (user_id=%s)", user_id)
+        await message.answer(
+            "Не удалось открыть меню смены. Попробуйте позже или обратитесь к координатору."
+        )
+        return
+    finally:
+        if lock is not None:
+            release_user_lock(lock)
+        await safe_delete(progress_message)
+
+    if progress is None or row_index is None:
+        return
+
     text = (
         "выберите раздел для заполнения.\n"
         "в каждом нужно указать данные по текущей смене."
@@ -108,6 +157,7 @@ async def back_to_main(message: types.Message) -> None:
 
     from features.main_menu import show_menu
 
+    await safe_delete(message)
     await show_menu(message)
 
 
@@ -115,6 +165,7 @@ async def back_to_main(message: types.Message) -> None:
 async def go_expenses(message: types.Message) -> None:
     """Заглушка раздела «Расходы» до подключения сценария."""
 
+    await safe_delete(message)
     await message.answer("раздел «расходы» подключим следующим этапом.")
 
 
@@ -122,6 +173,7 @@ async def go_expenses(message: types.Message) -> None:
 async def go_materials(message: types.Message) -> None:
     """Заглушка раздела «Материалы» до подключения сценария."""
 
+    await safe_delete(message)
     await message.answer("раздел «материалы» подключим следующим этапом.")
 
 
@@ -129,4 +181,5 @@ async def go_materials(message: types.Message) -> None:
 async def go_crew(message: types.Message) -> None:
     """Заглушка раздела «Бригада» до подключения сценария."""
 
+    await safe_delete(message)
     await message.answer("раздел «бригада» подключим следующим этапом.")
