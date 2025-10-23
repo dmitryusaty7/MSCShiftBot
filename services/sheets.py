@@ -216,12 +216,26 @@ class SheetsService:
             "Чтение диапазона %s!A2:G для проверки дублей ФИО", worksheet.title
         )
         values = retry(lambda: worksheet.get("A2:G"))
+        target_full = " ".join(part for part in (last, first, middle) if part)
         for row in values:
             last_name = (row[1] or "").strip() if len(row) > 1 else ""
             first_name = (row[2] or "").strip() if len(row) > 2 else ""
             middle_name = (row[3] or "").strip() if len(row) > 3 else ""
+            fio_cell = (row[4] or "").strip() if len(row) > 4 else ""
             status = (row[6] or "").strip() if len(row) > 6 else ""
-            if status == "Активен" and last_name == last and first_name == first and middle_name == middle:
+            if status != "Активен":
+                continue
+
+            if last_name == last and first_name == first and middle_name == middle:
+                return True
+
+            existing_full = " ".join(
+                part for part in (last_name, first_name, middle_name) if part
+            )
+            if not existing_full:
+                existing_full = fio_cell
+
+            if existing_full and target_full and existing_full.casefold() == target_full.casefold():
                 return True
         return False
 
@@ -236,6 +250,49 @@ class SheetsService:
         """Создаёт или возвращает строку регистрации пользователя."""
 
         worksheet = self.ws(spreadsheet_id)
+        spreadsheet = self._get_spreadsheet(spreadsheet_id)
+        sheet_name = worksheet.title
+        fio_full = " ".join(part for part in (last, first, middle) if part)
+
+        def build_updates(row_index: int) -> list[dict[str, object]]:
+            updates: list[dict[str, object]] = [
+                {
+                    "range": f"{sheet_name}!A{row_index}",
+                    "values": [[_norm_tid(telegram_id)]],
+                },
+                {
+                    "range": f"{sheet_name}!B{row_index}:C{row_index}",
+                    "values": [[last, first]],
+                },
+                {
+                    "range": f"{sheet_name}!G{row_index}",
+                    "values": [["Активен"]],
+                },
+            ]
+
+            if fio_full:
+                try:
+                    fio_cell = retry(
+                        lambda: worksheet.cell(
+                            row_index,
+                            self._col_to_index(DATA_COL_FIO),
+                            value_render_option="FORMULA",
+                        )
+                    )
+                    raw_value = getattr(fio_cell, "value", "")
+                except Exception:  # noqa: BLE001
+                    raw_value = ""
+
+                if not (isinstance(raw_value, str) and raw_value.startswith("=")):
+                    updates.append(
+                        {
+                            "range": f"{sheet_name}!{DATA_COL_FIO}{row_index}",
+                            "values": [[fio_full]],
+                        }
+                    )
+
+            return updates
+
         found_row, status = self.find_row_by_telegram_id(spreadsheet_id, telegram_id)
         if found_row:
             if status == "Архив":
@@ -244,35 +301,26 @@ class SheetsService:
             logger.info(
                 "Обновление данных пользователя %s в строке %s", telegram_id, found_row
             )
-            retry(lambda: worksheet.update([["", "", ""]], f"B{found_row}:D{found_row}"))
+            updates = build_updates(found_row)
             retry(
-                lambda: worksheet.update(
-                    [[last, first, middle]], f"B{found_row}:D{found_row}"
+                lambda: spreadsheet.values_batch_update(
+                    {"valueInputOption": "USER_ENTERED", "data": updates}
                 )
             )
-            retry(lambda: worksheet.update([["Активен"]], f"G{found_row}:G{found_row}"))
             return found_row
 
         row_index = self.find_first_free_row_by_A(spreadsheet_id)
         logger.info(
             "Создание новой строки %s для пользователя %s", row_index, telegram_id
         )
-        retry(lambda: worksheet.update([["", "", "", "", "", "", ""]], f"A{row_index}:G{row_index}"))
+        updates = build_updates(row_index)
         retry(
-            lambda: worksheet.update(
-                [[
-                    _norm_tid(telegram_id),
-                    last,
-                    first,
-                    middle,
-                    "",
-                    "",
-                    "Активен",
-                ]],
-                f"A{row_index}:G{row_index}",
+            lambda: spreadsheet.values_batch_update(
+                {"valueInputOption": "USER_ENTERED", "data": updates}
             )
         )
         return row_index
+
 
     # ---------- Работа с рабочими листами смен ----------
 

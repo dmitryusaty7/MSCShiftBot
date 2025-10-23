@@ -9,6 +9,7 @@ from aiogram.fsm.state import State, StatesGroup
 
 from services.env import require_env
 from services.sheets import SheetsService, validate_name_piece
+from features.main_menu import show_menu
 
 router = Router()
 
@@ -79,6 +80,7 @@ async def cmd_start(message: types.Message, state: FSMContext) -> None:
 
     if row and status != "Архив":
         await message.answer("Добро пожаловать! Вы уже зарегистрированы. Открываю панель.")
+        await show_menu(message)
         return
 
     if row and status == "Архив":
@@ -195,4 +197,4 @@ async def reg_save(message: types.Message, state: FSMContext) -> None:
         reply_markup=types.ReplyKeyboardRemove(),
     )
 
-    # TODO: подключить показ меню/дашборда после регистрации.
+    await show_menu(message)
