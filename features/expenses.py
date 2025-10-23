@@ -18,7 +18,16 @@ if TYPE_CHECKING:  # pragma: no cover
     from features.shift_menu import render_shift_menu as RenderShiftMenuFn
 
 router = Router()
-_svc = SheetsService()
+_service: SheetsService | None = None
+
+
+def _get_service() -> SheetsService:
+    """Ленивая инициализация сервиса работы с таблицей."""
+
+    global _service
+    if _service is None:
+        _service = SheetsService()
+    return _service
 
 
 def _render_shift_menu(*args, **kwargs):
@@ -103,9 +112,10 @@ async def start_expenses(message: types.Message, state: FSMContext) -> None:
 
     await safe_delete(message)
     user_id = message.from_user.id
-    row = _svc.get_shift_row_index_for_user(user_id)
+    service = _get_service()
+    row = service.get_shift_row_index_for_user(user_id)
     if row is None:
-        row = _svc.open_shift_for_user(user_id)
+        row = service.open_shift_for_user(user_id)
     await state.update_data(row=row, user_id=user_id)
     await ask_ship(message, state)
 
@@ -113,7 +123,8 @@ async def start_expenses(message: types.Message, state: FSMContext) -> None:
 async def ask_ship(message: types.Message, state: FSMContext) -> None:
     """Запрашивает название судна и предлагает варианты из списка."""
 
-    ships = _svc.get_active_ships()
+    service = _get_service()
+    ships = service.get_active_ships()
     await state.update_data(_ships=ships)
     await state.set_state(ExpenseFSM.ship)
     await message.answer(
@@ -184,7 +195,8 @@ async def add_ship(message: types.Message, state: FSMContext) -> None:
     if not candidate:
         await message.answer("повторите ввод названия судна.")
         return
-    _svc.add_ship(candidate)
+    service = _get_service()
+    service.add_ship(candidate)
     await state.update_data(ship=candidate)
     await safe_delete(message)
     await ask_holds(message, state)
@@ -412,7 +424,8 @@ async def confirm_save(message: types.Message, state: FSMContext) -> None:
     data = await state.get_data()
     row = data["row"]
     user_id = data["user_id"]
-    _svc.save_expenses_block(
+    service = _get_service()
+    service.save_expenses_block(
         telegram_id=user_id,
         row=row,
         ship=data.get("ship"),
