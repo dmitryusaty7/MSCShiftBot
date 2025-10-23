@@ -177,11 +177,12 @@ async def go_expenses(message: types.Message, state: FSMContext) -> None:
 
 
 @router.message(lambda msg: msg.text.startswith(BTN_MATERIALS_LABEL))
-async def go_materials(message: types.Message) -> None:
-    """Заглушка раздела «Материалы» до подключения сценария."""
+async def go_materials(message: types.Message, state: FSMContext) -> None:
+    """Переходит в сценарий заполнения раздела «Материалы»."""
 
-    await safe_delete(message)
-    await message.answer("раздел «материалы» подключим следующим этапом.")
+    from features.materials import start_materials
+
+    await start_materials(message, state)
 
 
 @router.message(lambda msg: msg.text.startswith(BTN_CREW_LABEL))
