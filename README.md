@@ -1,43 +1,97 @@
-# MCS ShiftBot
+# mcs shiftbot
 
-Telegram-бот для управления сменами MSC Baltic.
+> telegram-бот для учёта смен, материалов и расходов проекта msc baltic  
+> деплой в два шага, api на steroids, работает через google sheets + fsm core
 
-## Требования
-- Python 3.11+
-- Токен Telegram-бота
-- Доступ к Google Sheets с правами редактирования (сервисный аккаунт)
+---
 
-## Подготовка окружения
-1. Клонируйте репозиторий и перейдите в каталог проекта.
-2. Создайте виртуальное окружение (опционально) и установите зависимости:
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate
-   pip install -r requirements.txt
-   ```
-3. Сохраните JSON-файл сервисного аккаунта Google в корне проекта (по умолчанию ожидается `service_account.json`).
-4. Выдайте сервисному аккаунту права «Редактор» для таблицы Google: `https://docs.google.com/spreadsheets/d/1Hen1og8dtPl0L_zeBqSTZBXOpr0KJ0T2BKVbu5Ae2FM/edit`.
-5. Скопируйте файл `.env.example` и заполните его своими значениями (или экспортируйте переменные вручную):
-   ```bash
-   cp .env.example .env
-   # Отредактируйте .env и впишите токен бота, путь к JSON и ID таблицы
-   ```
+## 🧩 what u need
 
-## Запуск бота
-1. При первом запуске удобно воспользоваться скриптом, который подхватывает значения из `.env`:
-   ```bash
-   ./scripts/run_bot.sh
-   ```
-   Скрипт автоматически загрузит переменные окружения из `.env` и запустит `python bot_shift.py`.
-2. При желании можно стартовать бот напрямую:
-   ```bash
-   python bot_shift.py
-   ```
-3. Убедитесь, что бот запущен (в логе появится сообщение `Bot polling is started`).
-4. Откройте диалог с ботом @MSCShiftBot в Telegram и выполните /start.
+- 🐍 python 3.11+
+- 🔑 telegram bot token
+- 📄 google sheets creds (service account with editor rights)
+- 💻 os with bash / powershell support
 
-## Полезные советы
-- При первом запуске рекомендуется пройти полный сценарий регистрации и создать тестовую смену, чтобы проверить корректность доступа к таблице.
-- Для отладки сетевого взаимодействия с Google API можно установить переменную `LOG_LEVEL=DEBUG` и переопределить уровень логгера в `bot_shift.py`.
-- Если необходимо изменить названия листов или колонок, редактируйте соответствующие константы и методы в `src/sheets_service.py`.
+---
 
+## 🚀 setup env
+
+```bash
+# clone repo
+$ git clone https://github.com/dmitryusaty7/mscshiftbot.git
+$ cd mscshiftbot
+
+# setup virtual env
+$ python -m venv .venv
+
+# activate env
+$ source .venv/bin/activate     # linux / macos
+$ .venv\scripts\activate        # windows
+
+# install deps
+$ pip install -r requirements.txt
+```
+
+put ur `service_account.json` to project root — this is ur google api key, no key = no life  
+share ur sheet to service email with editor rights →  [google sheet link](https://docs.google.com/spreadsheets/d/1Hen1og8dtPl0L_zeBqSTZBXOpr0KJ0T2BKVbu5Ae2FM/edit)
+
+then drop .env setup:
+
+```bash
+$ cp .env.example .env
+$ nano .env
+# fill ur bot token, sheet id, json path etc
+```
+
+---
+
+## 💾 launch the bot
+
+### smart way (auto env loader)
+
+```bash
+$ ./scripts/run_bot.sh
+```
+this script:
+- auto loads .env
+- activates venv
+- validates creds
+- runs `bot_shift.py`
+
+if u see → `bot polling is started` — congrats, ur bot is alive 💀
+
+---
+
+### oldschool way
+
+```bash
+$ python bot_shift.py
+```
+then open telegram → find `@mscshiftbot` → hit `/start` → ur shift begins 🧩
+
+---
+
+## 🧭 check list
+
+- go thru registration flow (fio → validation → status: active)
+- create test shift → make sure sheet updates
+- if bot dead → debug mode:
+
+```bash
+$ log_level=debug python bot_shift.py
+```
+
+- tweak sheet layout inside `src/sheets_service.py` if needed
+
+---
+
+## 🧠 pro tips
+
+- never commit ur `service_account.json` (keep in .gitignore)
+- if google api rate limits u → chill, retry later or up quota
+- ready for webapp mini integration via telegram sdk — backend is modular
+
+---
+
+💬 mcs shiftbot — как админка для бригад, но через telegram и без боли.  
+run `/start`, register ur crew, drop expenses, log shifts. ez.
