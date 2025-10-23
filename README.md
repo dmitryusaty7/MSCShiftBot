@@ -46,11 +46,21 @@ python -m pip install -r requirements.txt
 ./scripts/run_bot.sh
 ```
 
+скрипт `scripts/run_bot.sh` рассчитан на bash-окружение (git bash, wsl, macos, linux).
+
 вариант b — вручную:
 
 ```bash
 python bot_shift.py
 ```
+
+### windows launch
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_bot.ps1
+```
+
+скрипт `scripts/run_bot.ps1` предназначен для Windows PowerShell.
 
 в консоли должно появиться: `bot polling is started` — значит live
 в telegram: @mscshiftbot → /start
