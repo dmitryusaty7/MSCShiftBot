@@ -55,10 +55,7 @@ async def show_menu(
         )
         return
 
-    text = (
-        f"Здравствуйте, {profile.fio}\n\n"
-        f"Вы закрыли {profile.closed_shifts} смен."
-    )
+    text = f"Смен закрыто: {profile.closed_shifts}."
     await message.answer(text, reply_markup=_menu_keyboard())
 
 

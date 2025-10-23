@@ -16,7 +16,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Callable, Optional, Tuple, TypeVar
 
 import gspread
@@ -443,13 +443,22 @@ class SheetsService:
 
         sid = spreadsheet_id or require_env("SPREADSHEET_ID")
         profile = self.get_user_profile(telegram_id, sid)
-        target_row = self._compute_target_row_for_user(telegram_id, sid)
-        today = date.today().isoformat()
+        ws_expenses = self._get_worksheet(SHEET_EXPENSES, sid)
+        today_date = date.today()
+        existing_row = self._find_today_row_for_user(
+            ws_expenses, telegram_id, today_date
+        )
+        if existing_row is not None:
+            target_row = existing_row
+        else:
+            target_row = self._compute_target_row_for_user(telegram_id, sid)
+
+        today_value = today_date.isoformat()
 
         batch = [
             {
                 "range": f"{SHEET_EXPENSES}!{EXPENSES_COL_DATE}{target_row}",
-                "values": [[today]],
+                "values": [[today_value]],
             },
             {
                 "range": f"{SHEET_EXPENSES}!{EXPENSES_COL_TG}{target_row}",
@@ -494,6 +503,35 @@ class SheetsService:
         ]
         candidates = [row for row in last_rows if row]
         return max(candidates) if candidates else None
+
+    def _find_today_row_for_user(
+        self,
+        ws_expenses: gspread.Worksheet,
+        telegram_id: int,
+        today: date,
+    ) -> Optional[int]:
+        """Ищет строку текущей смены в листе «Расходы смены» по дате и Telegram ID."""
+
+        date_values = retry(
+            lambda: ws_expenses.col_values(self._col_to_index(EXPENSES_COL_DATE))
+        )
+        tg_values = retry(
+            lambda: ws_expenses.col_values(self._col_to_index(EXPENSES_COL_TG))
+        )
+        max_length = max(len(date_values), len(tg_values))
+        target_tid = _norm_tid(telegram_id)
+
+        for offset in range(1, max_length):
+            raw_tid = tg_values[offset] if offset < len(tg_values) else ""
+            if _norm_tid(raw_tid) != target_tid:
+                continue
+
+            raw_date = date_values[offset] if offset < len(date_values) else ""
+            cell_date = self._parse_date_value(raw_date)
+            if cell_date == today:
+                return offset + 1
+
+        return None
 
     def get_shift_progress(
         self,
@@ -609,3 +647,24 @@ class SheetsService:
             return str(value).strip() != ""
 
         return all(_non_empty(cell) for cell in data)
+
+    @staticmethod
+    def _parse_date_value(value: Any) -> Optional[date]:
+        """Пытается преобразовать значение ячейки в дату."""
+
+        if isinstance(value, date):
+            return value
+        if isinstance(value, datetime):
+            return value.date()
+
+        text = str(value).strip()
+        if not text:
+            return None
+
+        for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
+            try:
+                return datetime.strptime(text, fmt).date()
+            except ValueError:
+                continue
+
+        return None
