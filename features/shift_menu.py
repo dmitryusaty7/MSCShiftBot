@@ -152,9 +152,6 @@ async def render_shift_menu(
     )
 
 
-from features.expenses import start_expenses
-
-
 @router.message(lambda msg: msg.text == BTN_BACK)
 async def back_to_main(message: types.Message) -> None:
     """Возвращает пользователя в основное меню."""
@@ -168,6 +165,8 @@ async def back_to_main(message: types.Message) -> None:
 @router.message(lambda msg: msg.text.startswith(BTN_EXPENSES_LABEL))
 async def go_expenses(message: types.Message, state: FSMContext) -> None:
     """Переходит в сценарий заполнения раздела «Расходы»."""
+
+    from features.expenses import start_expenses
 
     await start_expenses(message, state)
 

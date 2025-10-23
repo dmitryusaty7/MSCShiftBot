@@ -12,10 +12,21 @@ from aiogram.utils.keyboard import ReplyKeyboardBuilder
 
 from features.utils.messaging import safe_delete
 from services.sheets import SheetsService
-from features.shift_menu import render_shift_menu
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover
+    from features.shift_menu import render_shift_menu as RenderShiftMenuFn
 
 router = Router()
 _svc = SheetsService()
+
+
+def _render_shift_menu(*args, **kwargs):
+    """Ленивый импорт меню смены для избежания циклических зависимостей."""
+
+    from features.shift_menu import render_shift_menu
+
+    return render_shift_menu(*args, **kwargs)
 
 BTN_BACK = "⬅ Назад"
 BTN_HOME = "🏠 В меню"
@@ -417,7 +428,7 @@ async def confirm_save(message: types.Message, state: FSMContext) -> None:
     )
     await state.clear()
     await message.answer("раздел «расходы смены» сохранён ✅")
-    await render_shift_menu(message, user_id, row)
+    await _render_shift_menu(message, user_id, row)
 
 
 async def exit_by_nav(message: types.Message, state: FSMContext, key: str) -> None:
@@ -430,4 +441,4 @@ async def exit_by_nav(message: types.Message, state: FSMContext, key: str) -> No
 
         await show_menu(message)
         return
-    await render_shift_menu(message, data.get("user_id"), data.get("row"))
+    await _render_shift_menu(message, data.get("user_id"), data.get("row"))
