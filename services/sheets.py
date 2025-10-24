@@ -99,6 +99,14 @@ class UserProfile:
     fio_compact: str = ""
 
 
+class ShiftAlreadyOpenedError(RuntimeError):
+    """Поднимается, если в таблице уже есть смена на текущую дату."""
+
+    def __init__(self, shift_date: date):
+        super().__init__("Смена на текущую дату уже создана")
+        self.shift_date = shift_date
+
+
 def retry(func: Callable[[], T], tries: int = 3, backoff: float = 0.5) -> T:
     """Повторяет сетевой вызов при временных ошибках Google API."""
 
@@ -583,6 +591,8 @@ class SheetsService:
         if existing_row is not None:
             target_row = existing_row
         else:
+            if self._has_shift_for_date(ws_expenses, today_date):
+                raise ShiftAlreadyOpenedError(today_date)
             target_row = self._compute_target_row_for_user(telegram_id, sid)
 
         profile = self.get_user_profile(telegram_id, sid)
@@ -1309,6 +1319,20 @@ class SheetsService:
                 return offset + 1
 
         return None
+
+    def _has_shift_for_date(
+        self, worksheet: gspread.Worksheet, target_date: date
+    ) -> bool:
+        """Проверяет наличие любой смены на указанную дату в листе «Расходы смены»."""
+
+        column_values = retry(
+            lambda: worksheet.col_values(self._col_to_index(EXPENSES_COL_DATE))
+        )
+        for raw_value in column_values[1:]:
+            cell_date = self._parse_date_value(raw_value)
+            if cell_date == target_date:
+                return True
+        return False
 
     def get_shift_progress(
         self,

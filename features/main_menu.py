@@ -12,7 +12,11 @@ from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from features.shift_menu import render_shift_menu
 from features.utils.locks import acquire_user_lock, release_user_lock
 from features.utils.messaging import safe_delete, send_progress
-from services.sheets import SheetsService, UserProfile
+from services.sheets import (
+    ShiftAlreadyOpenedError,
+    SheetsService,
+    UserProfile,
+)
 
 router = Router()
 _service: SheetsService | None = None
@@ -108,6 +112,13 @@ async def start_shift(message: types.Message) -> None:
             row_index = await asyncio.to_thread(
                 service.open_shift_for_user, user_id
             )
+        except ShiftAlreadyOpenedError:
+            await safe_delete(progress_message)
+            progress_message = None
+            await message.answer(
+                "На сегодня все смены уже закрыты. Открывать смену можно только вручную."
+            )
+            return
         except Exception:  # noqa: BLE001
             logger.exception(
                 "Не удалось подготовить смену (user_id=%s)", user_id
