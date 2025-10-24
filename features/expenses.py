@@ -465,8 +465,10 @@ async def confirm_save(message: types.Message, state: FSMContext) -> None:
         k=data.get("k", 0),
     )
     await state.clear()
-    await message.answer("раздел «расходы смены» сохранён ✅")
-    await _render_shift_menu(message, user_id, row)
+    await message.answer("раздел «расходы смены» сохранён ✅\nвозвращаю в главное меню…")
+    from features.main_menu import show_menu
+
+    await show_menu(message)
 
 
 async def exit_by_nav(message: types.Message, state: FSMContext, key: str) -> None:

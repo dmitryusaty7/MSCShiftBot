@@ -323,9 +323,11 @@ async def confirm_upload(message: types.Message, state: FSMContext) -> None:
         )
         return
 
-    await message.answer("📎 фото успешно загружены.")
+    await message.answer("📎 фото успешно загружены. возвращаю в главное меню…")
     await state.clear()
-    await _render_shift_menu(message, user_id, row)
+    from features.main_menu import show_menu
+
+    await show_menu(message)
 
 
 @router.message(MaterialsFSM.photos)

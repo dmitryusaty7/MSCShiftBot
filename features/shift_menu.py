@@ -488,13 +488,8 @@ async def close_shift(message: types.Message) -> None:
         if group_sent
         else "смена закрыта."
     )
-    await message.answer(confirmation)
+    await message.answer(confirmation + "\nвозвращаю в главное меню…")
 
-    await render_shift_menu(
-        message,
-        user_id,
-        row,
-        service=sheets,
-        delete_trigger_message=True,
-        show_progress=False,
-    )
+    from features.main_menu import show_menu
+
+    await show_menu(message, service=sheets)
