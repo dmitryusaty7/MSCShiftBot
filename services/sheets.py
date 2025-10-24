@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from itertools import zip_longest
 from typing import Any, Callable, Optional, Tuple, TypeVar
+from threading import RLock
 
 import gspread
 from gspread.exceptions import APIError
@@ -248,6 +249,8 @@ class SheetsService:
         self.client = get_client()
         self._spreadsheet_cache: dict[str, gspread.Spreadsheet] = {}
         self._worksheet_cache: dict[tuple[str, str], gspread.Worksheet] = {}
+        self._closed_rows: set[tuple[str, int]] = set()
+        self._closed_rows_lock = RLock()
 
     @property
     def spreadsheet(self) -> gspread.Spreadsheet:
@@ -1180,13 +1183,25 @@ class SheetsService:
     def is_shift_closed(
         self, row: int, spreadsheet_id: Optional[str] = None
     ) -> bool:
-        """Проверяет, закрыта ли смена (есть отметка о закрытии в листе расходов)."""
+        """Проверяет, закрыта ли смена (по кешу и исторической отметке в листе расходов)."""
 
         sid = spreadsheet_id or require_env("SPREADSHEET_ID")
-        ws_expenses = self._get_worksheet(SHEET_EXPENSES, sid)
+        cache_key = (sid, row)
+        with self._closed_rows_lock:
+            if cache_key in self._closed_rows:
+                return True
+
         closed_column = getattr(self, "EXP_COL_CLOSED_AT", EXP_COL_CLOSED_AT)
+        if not closed_column:
+            return False
+
+        ws_expenses = self._get_worksheet(SHEET_EXPENSES, sid)
         cell = retry(lambda: ws_expenses.acell(f"{closed_column}{row}"))
-        return bool((cell.value or "").strip())
+        is_closed = bool((cell.value or "").strip())
+        if is_closed:
+            with self._closed_rows_lock:
+                self._closed_rows.add(cache_key)
+        return is_closed
 
     def finalize_shift(
         self,
@@ -1194,32 +1209,15 @@ class SheetsService:
         row: int,
         spreadsheet_id: Optional[str] = None,
     ) -> bool:
-        """Помечает смену закрытой и увеличивает счётчик закрытых смен пользователя."""
+        """Помечает смену закрытой в рамках текущего запуска без записи в таблицу."""
 
         sid = spreadsheet_id or require_env("SPREADSHEET_ID")
-        ws_expenses = self._get_worksheet(SHEET_EXPENSES, sid)
-        closed_column = getattr(self, "EXP_COL_CLOSED_AT", EXP_COL_CLOSED_AT)
-
-        closed_cell = retry(lambda: ws_expenses.acell(f"{closed_column}{row}"))
-        if (closed_cell.value or "").strip():
-            logger.info("Смена уже закрыта (user_id=%s, row=%s)", user_id, row)
-            return False
-
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        updates: list[dict[str, object]] = [
-            {
-                "range": f"{ws_expenses.title}!{closed_column}{row}",
-                "values": [[timestamp]],
-            }
-        ]
-
-        spreadsheet = self._get_spreadsheet(sid)
-        retry(
-            lambda: spreadsheet.values_batch_update(
-                {"valueInputOption": "USER_ENTERED", "data": updates}
-            )
-        )
+        cache_key = (sid, row)
+        with self._closed_rows_lock:
+            if cache_key in self._closed_rows:
+                logger.info("Смена уже закрыта (user_id=%s, row=%s)", user_id, row)
+                return False
+            self._closed_rows.add(cache_key)
         logger.info("Смена закрыта (user_id=%s, row=%s)", user_id, row)
         return True
 
