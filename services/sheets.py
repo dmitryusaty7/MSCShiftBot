@@ -1198,7 +1198,6 @@ class SheetsService:
 
         sid = spreadsheet_id or require_env("SPREADSHEET_ID")
         ws_expenses = self._get_worksheet(SHEET_EXPENSES, sid)
-        ws_data = self._get_worksheet(SHEET_DATA, sid)
         closed_column = getattr(self, "EXP_COL_CLOSED_AT", EXP_COL_CLOSED_AT)
 
         closed_cell = retry(lambda: ws_expenses.acell(f"{closed_column}{row}"))
@@ -1214,28 +1213,6 @@ class SheetsService:
                 "values": [[timestamp]],
             }
         ]
-
-        user_row = self._find_user_row_in_data(ws_data, user_id)
-        if user_row:
-            closed_counter_cell = retry(
-                lambda: ws_data.acell(f"{DATA_COL_CLOSED_SHIFTS}{user_row}")
-            )
-            raw_counter = (closed_counter_cell.value or "").strip()
-            try:
-                current_counter = int(raw_counter)
-            except ValueError:
-                current_counter = 0
-            updates.append(
-                {
-                    "range": f"{ws_data.title}!{DATA_COL_CLOSED_SHIFTS}{user_row}",
-                    "values": [[str(current_counter + 1)]],
-                }
-            )
-        else:
-            logger.warning(
-                "Не найден пользователь в листе 'Данные' для закрытия смены (user_id=%s)",
-                user_id,
-            )
 
         spreadsheet = self._get_spreadsheet(sid)
         retry(
