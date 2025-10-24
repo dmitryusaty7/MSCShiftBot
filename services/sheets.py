@@ -61,6 +61,7 @@ EXP_COL_TOTAL: str | None = None
 EXP_COL_CLOSED_AT = "L"
 
 MATERIALS_COL_TG = "B"
+MATERIALS_COL_FIO = "E"
 
 MAT_COL_PVD_M = "H"
 MAT_COL_PVC_PCS = "I"
@@ -68,7 +69,8 @@ MAT_COL_TAPE_PCS = "J"
 MAT_COL_FOLDER_LINK = "N"
 
 CREW_COL_TG = "B"
-CREW_COL_DRIVER = "F"
+CREW_COL_DRIVER = "E"
+CREW_COL_BRIGADIER = "F"
 CREW_COL_WORKERS = "G"
 
 DATA_COL_TG = "A"
@@ -79,8 +81,12 @@ DATA_COL_STATUS = "I"
 
 # пользовательские столбцы, которые нужно заполнить вручную
 EXPENSES_USER_COLS = [chr(code) for code in range(ord("C"), ord("K") + 1)]
-MATERIALS_USER_COLS = ["A"] + [chr(code) for code in range(ord("C"), ord("N") + 1)]
-CREW_USER_COLS = [CREW_COL_TG, CREW_COL_DRIVER, CREW_COL_WORKERS]
+MATERIALS_USER_COLS = ["A"] + [
+    column
+    for column in map(chr, range(ord("C"), ord("N") + 1))
+    if column != MATERIALS_COL_FIO
+]
+CREW_USER_COLS = [CREW_COL_TG, CREW_COL_DRIVER, CREW_COL_BRIGADIER, CREW_COL_WORKERS]
 
 T = TypeVar("T")
 
@@ -231,6 +237,7 @@ class SheetsService:
 
     EXPENSES_USER_COLS = EXPENSES_USER_COLS
     MATERIALS_USER_COLS = MATERIALS_USER_COLS
+    MATERIALS_COL_FIO = MATERIALS_COL_FIO
     CREW_USER_COLS = CREW_USER_COLS
     EXP_COL_SHIP = EXP_COL_SHIP
     EXP_COL_HOLDS = EXP_COL_HOLDS
@@ -578,7 +585,11 @@ class SheetsService:
         else:
             target_row = self._compute_target_row_for_user(telegram_id, sid)
 
+        profile = self.get_user_profile(telegram_id, sid)
+
         today_value = today_date.isoformat()
+        fio_value = (profile.fio or "").strip()
+        materials_fio_col = getattr(self, "MATERIALS_COL_FIO", MATERIALS_COL_FIO)
 
         batch = [
             {
@@ -594,6 +605,10 @@ class SheetsService:
                 "values": [[str(telegram_id)]],
             },
             {
+                "range": f"{SHEET_MATERIALS}!{materials_fio_col}{target_row}",
+                "values": [[fio_value]],
+            },
+            {
                 "range": f"{SHEET_CREW}!{CREW_COL_TG}{target_row}",
                 "values": [[str(telegram_id)]],
             },
@@ -604,6 +619,10 @@ class SheetsService:
                 [
                     {
                         "range": f"{SHEET_CREW}!{CREW_COL_DRIVER}{target_row}",
+                        "values": [[""]],
+                    },
+                    {
+                        "range": f"{SHEET_CREW}!{CREW_COL_BRIGADIER}{target_row}",
                         "values": [[""]],
                     },
                     {
@@ -620,7 +639,12 @@ class SheetsService:
             )
         )
         try:
-            self._ensure_brigadier_autofill(telegram_id, target_row, sid)
+            self._ensure_brigadier_autofill(
+                telegram_id,
+                target_row,
+                sid,
+                profile=profile,
+            )
         except Exception:  # noqa: BLE001
             logger.exception(
                 "Не удалось автоматически заполнить бригадира (user_id=%s, row=%s)",
@@ -630,18 +654,24 @@ class SheetsService:
         return target_row
 
     def _ensure_brigadier_autofill(
-        self, telegram_id: int, row: int, spreadsheet_id: Optional[str]
+        self,
+        telegram_id: int,
+        row: int,
+        spreadsheet_id: Optional[str],
+        *,
+        profile: UserProfile | None = None,
     ) -> None:
         """Записывает ФИО бригадира в лист «Состав бригады», если ячейка пуста."""
 
         sid = spreadsheet_id or require_env("SPREADSHEET_ID")
         ws_crew = self._get_worksheet(SHEET_CREW, sid)
-        cell = retry(lambda: ws_crew.acell(f"{CREW_COL_DRIVER}{row}"))
+        cell = retry(lambda: ws_crew.acell(f"{CREW_COL_BRIGADIER}{row}"))
         current_value = (cell.value or "").strip()
         if current_value:
             return
 
-        profile = self.get_user_profile(telegram_id, sid)
+        if profile is None:
+            profile = self.get_user_profile(telegram_id, sid)
         candidate = (profile.fio_compact or profile.fio or "").strip()
         if not candidate:
             return
@@ -653,7 +683,7 @@ class SheetsService:
                     "valueInputOption": "USER_ENTERED",
                     "data": [
                         {
-                            "range": f"{ws_crew.title}!{CREW_COL_DRIVER}{row}",
+                            "range": f"{ws_crew.title}!{CREW_COL_BRIGADIER}{row}",
                             "values": [[candidate]],
                         }
                     ],
