@@ -61,6 +61,7 @@ EXP_COL_TOTAL: str | None = None
 EXP_COL_CLOSED_AT = "L"
 
 MATERIALS_COL_TG = "B"
+MATERIALS_COL_FIO = "E"
 
 MAT_COL_PVD_M = "H"
 MAT_COL_PVC_PCS = "I"
@@ -68,7 +69,8 @@ MAT_COL_TAPE_PCS = "J"
 MAT_COL_FOLDER_LINK = "N"
 
 CREW_COL_TG = "B"
-CREW_COL_DRIVER = "F"
+CREW_COL_DRIVER = "E"
+CREW_COL_BRIGADIER = "F"
 CREW_COL_WORKERS = "G"
 
 DATA_COL_TG = "A"
@@ -79,8 +81,12 @@ DATA_COL_STATUS = "I"
 
 # пользовательские столбцы, которые нужно заполнить вручную
 EXPENSES_USER_COLS = [chr(code) for code in range(ord("C"), ord("K") + 1)]
-MATERIALS_USER_COLS = ["A"] + [chr(code) for code in range(ord("C"), ord("N") + 1)]
-CREW_USER_COLS = [CREW_COL_TG, CREW_COL_DRIVER, CREW_COL_WORKERS]
+MATERIALS_USER_COLS = ["A"] + [
+    column
+    for column in map(chr, range(ord("C"), ord("N") + 1))
+    if column not in {MATERIALS_COL_FIO, MAT_COL_FOLDER_LINK}
+]
+CREW_USER_COLS = [CREW_COL_TG, CREW_COL_DRIVER, CREW_COL_BRIGADIER, CREW_COL_WORKERS]
 
 T = TypeVar("T")
 
@@ -91,6 +97,14 @@ class UserProfile:
     fio: str
     closed_shifts: int
     fio_compact: str = ""
+
+
+class ShiftAlreadyOpenedError(RuntimeError):
+    """Поднимается, если в таблице уже есть смена на текущую дату."""
+
+    def __init__(self, shift_date: date):
+        super().__init__("Смена на текущую дату уже создана")
+        self.shift_date = shift_date
 
 
 def retry(func: Callable[[], T], tries: int = 3, backoff: float = 0.5) -> T:
@@ -231,6 +245,7 @@ class SheetsService:
 
     EXPENSES_USER_COLS = EXPENSES_USER_COLS
     MATERIALS_USER_COLS = MATERIALS_USER_COLS
+    MATERIALS_COL_FIO = MATERIALS_COL_FIO
     CREW_USER_COLS = CREW_USER_COLS
     EXP_COL_SHIP = EXP_COL_SHIP
     EXP_COL_HOLDS = EXP_COL_HOLDS
@@ -576,9 +591,14 @@ class SheetsService:
         if existing_row is not None:
             target_row = existing_row
         else:
+            if self._has_shift_for_date(ws_expenses, today_date):
+                raise ShiftAlreadyOpenedError(today_date)
             target_row = self._compute_target_row_for_user(telegram_id, sid)
 
+        profile = self.get_user_profile(telegram_id, sid)
+
         today_value = today_date.isoformat()
+        materials_fio_col = getattr(self, "MATERIALS_COL_FIO", MATERIALS_COL_FIO)
 
         batch = [
             {
@@ -603,7 +623,15 @@ class SheetsService:
             batch.extend(
                 [
                     {
+                        "range": f"{SHEET_MATERIALS}!{materials_fio_col}{target_row}",
+                        "values": [[""]],
+                    },
+                    {
                         "range": f"{SHEET_CREW}!{CREW_COL_DRIVER}{target_row}",
+                        "values": [[""]],
+                    },
+                    {
+                        "range": f"{SHEET_CREW}!{CREW_COL_BRIGADIER}{target_row}",
                         "values": [[""]],
                     },
                     {
@@ -620,7 +648,12 @@ class SheetsService:
             )
         )
         try:
-            self._ensure_brigadier_autofill(telegram_id, target_row, sid)
+            self._ensure_brigadier_autofill(
+                telegram_id,
+                target_row,
+                sid,
+                profile=profile,
+            )
         except Exception:  # noqa: BLE001
             logger.exception(
                 "Не удалось автоматически заполнить бригадира (user_id=%s, row=%s)",
@@ -630,18 +663,24 @@ class SheetsService:
         return target_row
 
     def _ensure_brigadier_autofill(
-        self, telegram_id: int, row: int, spreadsheet_id: Optional[str]
+        self,
+        telegram_id: int,
+        row: int,
+        spreadsheet_id: Optional[str],
+        *,
+        profile: UserProfile | None = None,
     ) -> None:
         """Записывает ФИО бригадира в лист «Состав бригады», если ячейка пуста."""
 
         sid = spreadsheet_id or require_env("SPREADSHEET_ID")
         ws_crew = self._get_worksheet(SHEET_CREW, sid)
-        cell = retry(lambda: ws_crew.acell(f"{CREW_COL_DRIVER}{row}"))
+        cell = retry(lambda: ws_crew.acell(f"{CREW_COL_BRIGADIER}{row}"))
         current_value = (cell.value or "").strip()
         if current_value:
             return
 
-        profile = self.get_user_profile(telegram_id, sid)
+        if profile is None:
+            profile = self.get_user_profile(telegram_id, sid)
         candidate = (profile.fio_compact or profile.fio or "").strip()
         if not candidate:
             return
@@ -653,7 +692,7 @@ class SheetsService:
                     "valueInputOption": "USER_ENTERED",
                     "data": [
                         {
-                            "range": f"{ws_crew.title}!{CREW_COL_DRIVER}{row}",
+                            "range": f"{ws_crew.title}!{CREW_COL_BRIGADIER}{row}",
                             "values": [[candidate]],
                         }
                     ],
@@ -1077,12 +1116,13 @@ class SheetsService:
         tape_value = parse_int(materials_values[2])
         photos_link = str(materials_values[3]).strip()
 
-        crew_columns = [CREW_COL_DRIVER, CREW_COL_WORKERS]
+        crew_columns = [CREW_COL_BRIGADIER, CREW_COL_DRIVER, CREW_COL_WORKERS]
         crew_values = fetch_row(
             ws_crew, crew_columns, value_option="FORMATTED_VALUE"
         )
-        driver_name = str(crew_values[0]).strip()
-        workers_line = str(crew_values[1]).strip()
+        brigadier_name = str(crew_values[0]).strip()
+        driver_name = str(crew_values[1]).strip()
+        workers_line = str(crew_values[2]).strip()
         if workers_line:
             workers_list = [
                 piece.strip()
@@ -1113,6 +1153,7 @@ class SheetsService:
                 "photos_link": photos_link or None,
             },
             "crew": {
+                "brigadier": brigadier_name,
                 "driver": driver_name,
                 "workers": workers_list,
             },
@@ -1280,6 +1321,20 @@ class SheetsService:
                 return offset + 1
 
         return None
+
+    def _has_shift_for_date(
+        self, worksheet: gspread.Worksheet, target_date: date
+    ) -> bool:
+        """Проверяет наличие любой смены на указанную дату в листе «Расходы смены»."""
+
+        column_values = retry(
+            lambda: worksheet.col_values(self._col_to_index(EXPENSES_COL_DATE))
+        )
+        for raw_value in column_values[1:]:
+            cell_date = self._parse_date_value(raw_value)
+            if cell_date == target_date:
+                return True
+        return False
 
     def get_shift_progress(
         self,
