@@ -13,11 +13,13 @@ from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from features.utils.locks import acquire_user_lock, release_user_lock
 from features.utils.messaging import safe_delete, send_progress
 from services.sheets import SheetsService
-from services.env import get_group_chat_id, group_notifications_enabled
+from services.env import group_notifications_enabled
 
 router = Router()
 _service: SheetsService | None = None
 logger = logging.getLogger(__name__)
+
+GROUP_CHAT_ID = -1003298300145
 
 
 def _get_service() -> SheetsService:
@@ -248,106 +250,42 @@ def _format_date_for_summary(date_value: str) -> str:
     return text
 
 
-def render_group_summary(brigadier: str, summary: dict[str, object]) -> str:
-    """Собирает текст сводки для отправки в групповой чат."""
+def build_group_report(brigadier: str, summary: dict[str, object]) -> str:
+    """Формирует текст отчёта для группового чата."""
 
     expenses = summary.get("expenses", {}) if isinstance(summary, dict) else {}
     materials = summary.get("materials", {}) if isinstance(summary, dict) else {}
-    crew = summary.get("crew", {}) if isinstance(summary, dict) else {}
 
     date_text = _format_date_for_summary(str(summary.get("date", "")))
     ship = str(summary.get("ship", "")).strip() or "—"
-    holds = summary.get("holds", 0)
-    try:
-        holds_text = str(int(holds))
-    except (TypeError, ValueError):
-        holds_text = "—"
-
-    def amount(key: str) -> str:
-        value = 0
-        if isinstance(expenses, dict):
-            raw = expenses.get(key, 0)
-            try:
-                value = int(raw)
-            except (TypeError, ValueError):
-                value = 0
-        return _format_number(value)
 
     total_amount = 0
     if isinstance(expenses, dict):
-        raw_total = expenses.get("total", 0)
-        try:
-            total_amount = int(raw_total)
-        except (TypeError, ValueError):
-            total_amount = 0
+        for key in ("driver", "brigadier", "workers", "aux", "food", "taxi", "other"):
+            try:
+                total_amount += int(expenses.get(key, 0) or 0)
+            except (TypeError, ValueError):
+                continue
     total_text = _format_number(total_amount)
 
-    pvd = 0
-    pvc = 0
-    tape = 0
-    photos_link = None
+    photos_link = "—"
     if isinstance(materials, dict):
-        try:
-            pvd = int(materials.get("pvd_rolls_m", 0) or 0)
-        except (TypeError, ValueError):
-            pvd = 0
-        try:
-            pvc = int(materials.get("pvc_tubes", 0) or 0)
-        except (TypeError, ValueError):
-            pvc = 0
-        try:
-            tape = int(materials.get("tape", 0) or 0)
-        except (TypeError, ValueError):
-            tape = 0
         link_candidate = materials.get("photos_link")
         if isinstance(link_candidate, str) and link_candidate.strip():
             photos_link = link_candidate.strip()
 
-    driver_name = "—"
-    workers_names = "—"
-    if isinstance(crew, dict):
-        driver_candidate = crew.get("driver", "")
-        if isinstance(driver_candidate, str) and driver_candidate.strip():
-            driver_name = driver_candidate.strip()
-        workers_candidate = crew.get("workers", [])
-        if isinstance(workers_candidate, list):
-            cleaned = [
-                str(item).strip()
-                for item in workers_candidate
-                if str(item).strip()
-            ]
-            if cleaned:
-                workers_names = ", ".join(cleaned)
-
-    materials_line = (
-        f"материалы: ПВД {pvd} м, ПВХ {pvc} шт, лента {tape} шт"
-    )
-    photos_line = f"фото: {photos_link}" if photos_link else "фото: —"
+    brigadier_line = brigadier.strip() if brigadier and brigadier.strip() else "—"
 
     lines = [
-        f"бригада: {brigadier or '—'}",
-        f"дата: {date_text} | судно: {ship} | трюмов: {holds_text}",
+        "✅ Смена закрыта",
         "",
-        (
-            "расходы (₽): "
-            f"водитель {amount('driver')}, "
-            f"бригадир {amount('brigadier')}, "
-            f"рабочие {amount('workers')}, "
-            f"вспом. {amount('aux')}, "
-            f"питание {amount('food')}, "
-            f"такси {amount('taxi')}, "
-            f"прочие {amount('other')}"
-        ),
-        f"итого: {total_text}",
+        f"👷‍♂️ Бригадир: {brigadier_line}",
+        f"📅 Дата: {date_text}",
+        f"🛳 Судно: {ship}",
+        f"💰 Всего расходов: {total_text} ₽",
+        f"📷 Фото: {photos_link}",
         "",
-        materials_line,
-        photos_line,
-        "",
-        (
-            "состав: "
-            f"водитель — {driver_name}; "
-            f"рабочие — {workers_names}"
-        ),
+        "Спасибо за работу!",
     ]
     return "\n".join(lines)
 
@@ -417,6 +355,15 @@ async def close_shift(message: types.Message) -> None:
         )
         return
 
+    profile = None
+    try:
+        profile = await asyncio.to_thread(sheets.get_user_profile, user_id)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Не удалось получить профиль пользователя перед закрытием (user_id=%s)",
+            user_id,
+        )
+
     try:
         summary = await asyncio.to_thread(sheets.get_shift_summary, row)
     except Exception:  # noqa: BLE001
@@ -448,43 +395,36 @@ async def close_shift(message: types.Message) -> None:
         return
 
     notifications_enabled = group_notifications_enabled()
-    group_id: int | None = None
-    if notifications_enabled:
-        try:
-            group_id = get_group_chat_id()
-        except RuntimeError as error:
-            notifications_enabled = False
-            logger.error("Некорректный GROUP_CHAT_ID: %s", error)
-
     group_sent = False
-    if notifications_enabled and group_id is not None:
+    if notifications_enabled:
         crew_info = summary.get("crew") if isinstance(summary, dict) else None
         brigadier_name = ""
         if isinstance(crew_info, dict):
-            name_candidate = crew_info.get("driver")
+            name_candidate = crew_info.get("brigadier")
             if isinstance(name_candidate, str) and name_candidate.strip():
                 brigadier_name = name_candidate.strip()
+        if not brigadier_name and profile is not None:
+            brigadier_name = profile.fio or profile.fio_compact
         if not brigadier_name:
             brigadier_name = (
                 message.from_user.full_name
                 or message.from_user.username
                 or str(user_id)
             )
-        text = render_group_summary(brigadier_name, summary)
+        report_text = build_group_report(brigadier_name, summary)
         try:
             await message.bot.send_message(
-                chat_id=group_id,
-                text=text,
-                disable_web_page_preview=True,
+                chat_id=GROUP_CHAT_ID,
+                text=report_text,
             )
             group_sent = True
         except Exception:  # noqa: BLE001
             logger.exception(
-                "Не удалось отправить сводку в чат %s", group_id
+                "Не удалось отправить отчёт в групповой чат %s", GROUP_CHAT_ID
             )
 
     confirmation = (
-        "смена закрыта. сводка отправлена в общий чат."
+        "смена закрыта. отчёт отправлен в групповой чат."
         if group_sent
         else "смена закрыта."
     )

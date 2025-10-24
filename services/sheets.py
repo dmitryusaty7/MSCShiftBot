@@ -66,7 +66,7 @@ MATERIALS_COL_FIO = "E"
 MAT_COL_PVD_M = "H"
 MAT_COL_PVC_PCS = "I"
 MAT_COL_TAPE_PCS = "J"
-MAT_COL_FOLDER_LINK = "N"
+MAT_COL_FOLDER_LINK = "G"
 
 CREW_COL_TG = "B"
 CREW_COL_DRIVER = "E"
@@ -84,7 +84,7 @@ EXPENSES_USER_COLS = [chr(code) for code in range(ord("C"), ord("K") + 1)]
 MATERIALS_USER_COLS = ["A"] + [
     column
     for column in map(chr, range(ord("C"), ord("N") + 1))
-    if column != MATERIALS_COL_FIO
+    if column not in {MATERIALS_COL_FIO, MAT_COL_FOLDER_LINK}
 ]
 CREW_USER_COLS = [CREW_COL_TG, CREW_COL_DRIVER, CREW_COL_BRIGADIER, CREW_COL_WORKERS]
 
@@ -1116,12 +1116,13 @@ class SheetsService:
         tape_value = parse_int(materials_values[2])
         photos_link = str(materials_values[3]).strip()
 
-        crew_columns = [CREW_COL_DRIVER, CREW_COL_WORKERS]
+        crew_columns = [CREW_COL_BRIGADIER, CREW_COL_DRIVER, CREW_COL_WORKERS]
         crew_values = fetch_row(
             ws_crew, crew_columns, value_option="FORMATTED_VALUE"
         )
-        driver_name = str(crew_values[0]).strip()
-        workers_line = str(crew_values[1]).strip()
+        brigadier_name = str(crew_values[0]).strip()
+        driver_name = str(crew_values[1]).strip()
+        workers_line = str(crew_values[2]).strip()
         if workers_line:
             workers_list = [
                 piece.strip()
@@ -1152,6 +1153,7 @@ class SheetsService:
                 "photos_link": photos_link or None,
             },
             "crew": {
+                "brigadier": brigadier_name,
                 "driver": driver_name,
                 "workers": workers_list,
             },
