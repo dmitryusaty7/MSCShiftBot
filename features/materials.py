@@ -118,7 +118,14 @@ async def start_materials(message: types.Message, state: FSMContext) -> None:
             "и попробуйте позже или обратитесь к администратору."
         )
         await state.clear()
-        await _render_shift_menu(message, user_id, row)
+        await _render_shift_menu(
+            message,
+            user_id,
+            row,
+            state=state,
+            delete_trigger_message=False,
+            show_progress=False,
+        )
         return
 
     await state.update_data(
@@ -323,11 +330,19 @@ async def confirm_upload(message: types.Message, state: FSMContext) -> None:
         )
         return
 
-    await message.answer("📎 фото успешно загружены. возвращаю в главное меню…")
-    await state.clear()
-    from features.main_menu import show_menu
+    from features.shift_menu import mark_mode_done
 
-    await show_menu(message)
+    await message.answer("📎 фото успешно загружены. возвращаю в меню смены…")
+    await state.clear()
+    mark_mode_done(user_id, "materials")
+    await _render_shift_menu(
+        message,
+        user_id,
+        row,
+        state=state,
+        delete_trigger_message=False,
+        show_progress=False,
+    )
 
 
 @router.message(MaterialsFSM.photos)
@@ -343,8 +358,15 @@ async def exit_nav(message: types.Message, state: FSMContext, key: str) -> None:
     if key == BTN_HOME:
         from features.main_menu import show_menu
 
-        return await show_menu(message)
-    await _render_shift_menu(message, data.get("user_id"), data.get("row"))
+        return await show_menu(message, state=state)
+    await _render_shift_menu(
+        message,
+        data.get("user_id"),
+        data.get("row"),
+        state=state,
+        delete_trigger_message=False,
+        show_progress=False,
+    )
 
 
 def _ensure_bytes(downloaded) -> bytes:

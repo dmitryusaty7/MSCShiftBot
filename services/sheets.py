@@ -589,10 +589,10 @@ class SheetsService:
             ws_expenses, telegram_id, today_date
         )
         if existing_row is not None:
+            if self._row_closed(ws_expenses, existing_row):
+                raise ShiftAlreadyOpenedError(today_date)
             target_row = existing_row
         else:
-            if self._has_shift_for_date(ws_expenses, today_date):
-                raise ShiftAlreadyOpenedError(today_date)
             target_row = self._compute_target_row_for_user(telegram_id, sid)
 
         profile = self.get_user_profile(telegram_id, sid)
@@ -1250,7 +1250,7 @@ class SheetsService:
         row: int,
         spreadsheet_id: Optional[str] = None,
     ) -> bool:
-        """Помечает смену закрытой в рамках текущего запуска без записи в таблицу."""
+        """Помечает смену закрытой и записывает отметку в лист расходов."""
 
         sid = spreadsheet_id or require_env("SPREADSHEET_ID")
         cache_key = (sid, row)
@@ -1260,6 +1260,22 @@ class SheetsService:
                 return False
             self._closed_rows.add(cache_key)
         logger.info("Смена закрыта (user_id=%s, row=%s)", user_id, row)
+        closed_column = getattr(self, "EXP_COL_CLOSED_AT", EXP_COL_CLOSED_AT)
+        if closed_column:
+            ws_expenses = self._get_worksheet(SHEET_EXPENSES, sid)
+            timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M")
+            try:
+                retry(
+                    lambda: ws_expenses.update_acell(
+                        f"{closed_column}{row}", timestamp
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Не удалось записать отметку о закрытии (user_id=%s, row=%s)",
+                    user_id,
+                    row,
+                )
         return True
 
     def _last_nonempty_row_in_column(
@@ -1322,6 +1338,17 @@ class SheetsService:
 
         return None
 
+    def _row_closed(
+        self, ws_expenses: gspread.Worksheet, row: int
+    ) -> bool:
+        """Проверяет, отмечена ли строка смены как закрытая в листе расходов."""
+
+        closed_column = getattr(self, "EXP_COL_CLOSED_AT", EXP_COL_CLOSED_AT)
+        if not closed_column:
+            return False
+        cell = retry(lambda: ws_expenses.acell(f"{closed_column}{row}"))
+        return bool((cell.value or "").strip())
+
     def _has_shift_for_date(
         self, worksheet: gspread.Worksheet, target_date: date
     ) -> bool:
@@ -1335,6 +1362,33 @@ class SheetsService:
             if cell_date == target_date:
                 return True
         return False
+
+    def check_today_shift_lock(
+        self, telegram_id: int, spreadsheet_id: Optional[str] = None
+    ) -> tuple[bool, Optional[int]]:
+        """Возвращает признак закрытия смены сегодня и номер строки, если есть."""
+
+        sid = spreadsheet_id or require_env("SPREADSHEET_ID")
+        ws_expenses = self._get_worksheet(SHEET_EXPENSES, sid)
+        today_row = self._find_today_row_for_user(
+            ws_expenses, telegram_id, date.today()
+        )
+        if today_row is None:
+            return False, None
+        return self._row_closed(ws_expenses, today_row), today_row
+
+    def get_shift_date(
+        self, row: int, spreadsheet_id: Optional[str] = None
+    ) -> str:
+        """Возвращает дату смены в ISO-формате из листа «Расходы смены».
+
+        Если ячейка пуста, возвращает пустую строку.
+        """
+
+        sid = spreadsheet_id or require_env("SPREADSHEET_ID")
+        ws_expenses = self._get_worksheet(SHEET_EXPENSES, sid)
+        cell = retry(lambda: ws_expenses.acell(f"{EXPENSES_COL_DATE}{row}"))
+        return (cell.value or "").strip()
 
     def get_shift_progress(
         self,

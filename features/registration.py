@@ -84,7 +84,7 @@ async def cmd_start(message: types.Message, state: FSMContext) -> None:
 
     if row and status != "Архив":
         await message.answer("Добро пожаловать! Вы уже зарегистрированы. Открываю панель.")
-        await show_menu(message, service=service)
+        await show_menu(message, service=service, state=state)
         return
 
     if row and status == "Архив":
@@ -204,4 +204,4 @@ async def reg_save(message: types.Message, state: FSMContext) -> None:
         reply_markup=types.ReplyKeyboardRemove(),
     )
 
-    await show_menu(message, service=service)
+    await show_menu(message, service=service, state=state)

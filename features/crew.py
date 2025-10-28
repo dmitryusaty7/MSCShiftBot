@@ -222,7 +222,14 @@ async def _return_to_shift_menu(message: types.Message, state: FSMContext) -> No
     row = data.get("row")
     await _clear_workers_message(message, state)
     await state.clear()
-    await _render_shift_menu(message, user_id, row)
+    await _render_shift_menu(
+        message,
+        user_id,
+        row,
+        state=state,
+        delete_trigger_message=False,
+        show_progress=False,
+    )
 
 
 async def _go_home(message: types.Message, state: FSMContext) -> None:
@@ -232,7 +239,7 @@ async def _go_home(message: types.Message, state: FSMContext) -> None:
 
     await _clear_workers_message(message, state)
     await state.clear()
-    await show_menu(message)
+    await show_menu(message, state=state)
 
 
 async def _refresh_drivers(state: FSMContext) -> list[str]:
@@ -924,5 +931,15 @@ async def handle_confirm(message: types.Message, state: FSMContext) -> None:
 
     await _clear_workers_message(message, state)
     await state.clear()
-    await message.answer("состав бригады сохранён.")
-    await _render_shift_menu(message, user_id, row)
+    from features.shift_menu import mark_mode_done
+
+    mark_mode_done(user_id, "crew")
+    await message.answer("состав бригады сохранён. возвращаю в меню смены…")
+    await _render_shift_menu(
+        message,
+        user_id,
+        row,
+        state=state,
+        delete_trigger_message=False,
+        show_progress=False,
+    )
