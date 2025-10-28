@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import date, datetime
+from typing import Any
 
-from aiogram import F, Router, types
+from aiogram import Router, types
 from aiogram.fsm.context import FSMContext
-from aiogram.utils.keyboard import ReplyKeyboardBuilder
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from features.utils.locks import acquire_user_lock, release_user_lock
 from features.utils.messaging import safe_delete, send_progress
@@ -20,6 +24,41 @@ _service: SheetsService | None = None
 logger = logging.getLogger(__name__)
 
 GROUP_CHAT_ID = -1003298300145
+
+
+class ShiftState(StatesGroup):
+    """Глобальные состояния процесса оформления смены."""
+
+    IDLE = State()
+    ACTIVE = State()
+
+
+class Mode(StatesGroup):
+    """Состояния перехода в подрежимы."""
+
+    EXPENSES = State()
+    MATERIALS = State()
+    CREW = State()
+
+
+@dataclass
+class ShiftSession:
+    """Отражает локальный прогресс заполнения смены."""
+
+    date: str
+    row: int
+    modes: dict[str, bool]
+    closed: bool = False
+
+
+_sessions: dict[int, ShiftSession] = {}
+
+
+MODE_KEYS = {
+    "expenses": "expenses",
+    "materials": "materials",
+    "crew": "crew",
+}
 
 
 def _get_service() -> SheetsService:
@@ -45,7 +84,6 @@ def _resolve_service(service: SheetsService | None) -> SheetsService:
 BTN_EXPENSES_LABEL = "🧾 Расходы"
 BTN_MATERIALS_LABEL = "📦 Материалы"
 BTN_CREW_LABEL = "👥 Бригада"
-BTN_BACK = "⬅ Назад в главное меню"
 BTN_FINISH_SHIFT = "✅ Завершить смену"
 
 # ---- стиль статусов: 'emoji' | 'traffic' | 'text'
@@ -71,28 +109,92 @@ def _line(label: str, done: bool) -> str:
     return f"{label} — {status_badge(done)}"
 
 
-def _keyboard(
-    expenses_ok: bool,
-    materials_ok: bool,
-    crew_ok: bool,
-    *,
-    close_enabled: bool,
-) -> types.ReplyKeyboardMarkup:
-    """Собирает клавиатуру меню смены."""
+def reset_shift_session(user_id: int) -> None:
+    """Очищает кеш сессии пользователя."""
 
-    keyboard = ReplyKeyboardBuilder()
-    keyboard.button(text=_line(BTN_EXPENSES_LABEL, expenses_ok))
-    keyboard.button(text=_line(BTN_MATERIALS_LABEL, materials_ok))
-    keyboard.button(text=_line(BTN_CREW_LABEL, crew_ok))
-    if close_enabled:
-        keyboard.button(text=BTN_FINISH_SHIFT)
-    keyboard.button(text=BTN_BACK)
-    layout = [1, 1, 1]
-    if close_enabled:
-        layout.append(1)
-    layout.append(1)
-    keyboard.adjust(*layout)
-    return keyboard.as_markup(resize_keyboard=True)
+    _sessions.pop(user_id, None)
+
+
+def _sync_session(
+    user_id: int,
+    *,
+    row: int,
+    progress: dict[str, bool],
+    shift_date: str,
+    closed: bool,
+) -> ShiftSession:
+    """Обновляет кеш прогресса пользователя и возвращает его."""
+
+    session = _sessions.get(user_id)
+    if session is None or session.date != shift_date:
+        session = ShiftSession(
+            date=shift_date,
+            row=row,
+            modes={key: bool(progress.get(key, False)) for key in MODE_KEYS.values()},
+            closed=closed,
+        )
+        _sessions[user_id] = session
+    else:
+        session.row = row
+        session.closed = closed
+        for key in MODE_KEYS.values():
+            if key in progress:
+                session.modes[key] = bool(progress[key])
+    return session
+
+
+def mark_mode_done(user_id: int, mode: str) -> None:
+    """Помечает раздел заполненным в локальной сессии."""
+
+    session = _sessions.get(user_id)
+    key = MODE_KEYS.get(mode)
+    if session and key:
+        session.modes[key] = True
+
+
+def mark_shift_closed(user_id: int) -> None:
+    """Помечает смену как закрытую в локальной сессии."""
+
+    session = _sessions.get(user_id)
+    if session:
+        session.closed = True
+
+
+def _payload(action: str, **extra: Any) -> str:
+    """Собирает JSON-пейлоад для inline-кнопок."""
+
+    data = {"a": action}
+    data.update(extra)
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+
+
+def _keyboard(session: ShiftSession) -> types.InlineKeyboardMarkup:
+    """Собирает inline-клавиатуру меню смены."""
+
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text=BTN_EXPENSES_LABEL,
+        callback_data=_payload("open_mode", m="expenses"),
+    )
+    builder.button(
+        text=BTN_MATERIALS_LABEL,
+        callback_data=_payload("open_mode", m="materials"),
+    )
+    builder.button(
+        text=BTN_CREW_LABEL,
+        callback_data=_payload("open_mode", m="crew"),
+    )
+    if all(session.modes.values()) and not session.closed:
+        builder.button(
+            text=BTN_FINISH_SHIFT,
+            callback_data=_payload("finish_shift"),
+        )
+    builder.button(
+        text="⬅ В главное меню",
+        callback_data=_payload("shift_menu", m="home"),
+    )
+    builder.adjust(1)
+    return builder.as_markup()
 
 
 async def render_shift_menu(
@@ -101,6 +203,7 @@ async def render_shift_menu(
     row: int | None,
     service: SheetsService | None = None,
     *,
+    state: FSMContext | None = None,
     delete_trigger_message: bool = True,
     show_progress: bool = True,
 ) -> None:
@@ -171,62 +274,188 @@ async def render_shift_menu(
         )
         shift_closed = False
 
-    close_enabled = all(progress.values()) and not shift_closed
-
-    base_text = (
-        "выберите раздел для заполнения.\n"
-        "в каждом нужно указать данные по текущей смене."
-    )
-    if shift_closed:
-        base_text += (
-            "\n\nсмена уже закрыта. если нужно начать новую — вернитесь в главное меню."
+    try:
+        shift_date_raw = await asyncio.to_thread(
+            sheets.get_shift_date, row_index
         )
-    await message.answer(
-        base_text,
-        reply_markup=_keyboard(
-            expenses_ok=progress["expenses"],
-            materials_ok=progress["materials"],
-            crew_ok=progress["crew"],
-            close_enabled=close_enabled,
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Не удалось получить дату смены (user_id=%s, row=%s)", user_id, row_index
+        )
+        shift_date_raw = ""
+
+    shift_date = (shift_date_raw or date.today().isoformat()).strip()
+    session = _sync_session(
+        user_id,
+        row=row_index,
+        progress=progress,
+        shift_date=shift_date,
+        closed=shift_closed,
+    )
+
+    if state is not None:
+        await state.set_state(ShiftState.ACTIVE)
+
+    lines = [
+        "🗂 Меню оформления смены",
+        f"Дата: {_format_date_for_summary(session.date)}",
+        "",
+        _line(BTN_EXPENSES_LABEL, session.modes["expenses"]),
+        _line(BTN_MATERIALS_LABEL, session.modes["materials"]),
+        _line(BTN_CREW_LABEL, session.modes["crew"]),
+    ]
+
+    if session.closed:
+        lines.extend(
+            [
+                "",
+                "Смена уже закрыта. Вернитесь в главное меню, чтобы открыть новую смену завтра.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "",
+                "Выберите раздел для заполнения. Кнопка «Завершить смену» появится, когда все разделы будут отмечены как готовые.",
+            ]
+        )
+
+    await message.answer("\n".join(lines), reply_markup=_keyboard(session))
+
+
+def _parse_payload(raw: str | None) -> dict[str, Any] | None:
+    """Безопасно разбирает JSON-пейлоад из callback_data."""
+
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.debug("Некорректный payload в callback: %s", raw)
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+async def _open_mode(callback: types.CallbackQuery, state: FSMContext, mode: str) -> None:
+    """Запускает подрежим оформления смены."""
+
+    handlers = {
+        "expenses": (
+            Mode.EXPENSES,
+            "start_expenses",
+            "features.expenses",
         ),
+        "materials": (
+            Mode.MATERIALS,
+            "start_materials",
+            "features.materials",
+        ),
+        "crew": (
+            Mode.CREW,
+            "start_crew",
+            "features.crew",
+        ),
+    }
+
+    target = handlers.get(mode)
+    if not target:
+        await callback.answer("Раздел недоступен", show_alert=True)
+        return
+
+    await state.update_data(_shift_user_id=callback.from_user.id)
+    await state.set_state(target[0])
+    module_name = target[2]
+    function_name = target[1]
+    module = __import__(module_name, fromlist=[function_name])
+    handler = getattr(module, function_name)
+    await callback.answer()
+    await handler(callback.message, state, user_id=callback.from_user.id)
+
+
+async def _refresh_menu(
+    callback: types.CallbackQuery,
+    state: FSMContext,
+    payload: dict[str, Any],
+) -> None:
+    """Перерисовывает меню или возвращает пользователя в главное меню."""
+
+    destination = payload.get("m")
+    if destination == "home":
+        from features.main_menu import show_menu
+
+        await callback.answer()
+        await safe_delete(callback.message)
+        await show_menu(callback.message, state=state)
+        return
+
+    session = _sessions.get(callback.from_user.id)
+    row = session.row if session else None
+    await callback.answer()
+    await render_shift_menu(
+        callback.message,
+        callback.from_user.id,
+        row,
+        state=state,
+        delete_trigger_message=True,
+        show_progress=False,
     )
 
 
-@router.message(lambda msg: msg.text == BTN_BACK)
-async def back_to_main(message: types.Message) -> None:
-    """Возвращает пользователя в основное меню."""
+async def _mark_mode_done_from_callback(
+    callback: types.CallbackQuery, mode: str, state: FSMContext
+) -> None:
+    """Обновляет прогресс и возвращает пользователя в меню."""
 
-    from features.main_menu import show_menu
-
-    await safe_delete(message)
-    await show_menu(message)
-
-
-@router.message(lambda msg: msg.text.startswith(BTN_EXPENSES_LABEL))
-async def go_expenses(message: types.Message, state: FSMContext) -> None:
-    """Переходит в сценарий заполнения раздела «Расходы»."""
-
-    from features.expenses import start_expenses
-
-    await start_expenses(message, state)
-
-
-@router.message(lambda msg: msg.text.startswith(BTN_MATERIALS_LABEL))
-async def go_materials(message: types.Message, state: FSMContext) -> None:
-    """Переходит в сценарий заполнения раздела «Материалы»."""
-
-    from features.materials import start_materials
-
-    await start_materials(message, state)
+    mark_mode_done(callback.from_user.id, mode)
+    session = _sessions.get(callback.from_user.id)
+    row = session.row if session else None
+    await callback.answer("Раздел отмечен как заполненный")
+    await render_shift_menu(
+        callback.message,
+        callback.from_user.id,
+        row,
+        state=state,
+        delete_trigger_message=True,
+        show_progress=False,
+    )
 
 
-@router.message(lambda msg: msg.text.startswith(BTN_CREW_LABEL))
-async def go_crew(message: types.Message, state: FSMContext) -> None:
-    """Переходит в сценарий заполнения раздела «Бригада»."""
+@router.callback_query()
+async def handle_shift_callback(
+    callback: types.CallbackQuery, state: FSMContext
+) -> None:
+    """Единая точка обработки callback-кнопок меню смены."""
 
-    from features.crew import start_crew
+    payload = _parse_payload(callback.data)
+    if not payload:
+        return
 
-    await start_crew(message, state)
+    action = payload.get("a")
+
+    if not action:
+        await callback.answer("Неизвестная команда", show_alert=True)
+        return
+
+    if action == "shift_menu":
+        await _refresh_menu(callback, state, payload)
+        return
+
+    if action == "open_mode":
+        await _open_mode(callback, state, str(payload.get("m")))
+        return
+
+    if action == "finish_shift":
+        await close_shift(callback, state)
+        return
+
+    if action in {"expenses_done", "materials_done", "crew_done"}:
+        mode = action.split("_")[0]
+        await _mark_mode_done_from_callback(callback, mode, state)
+        return
+
+    await callback.answer("Команда не поддерживается", show_alert=True)
 
 
 def _format_number(value: int) -> str:
@@ -290,11 +519,13 @@ def build_group_report(brigadier: str, summary: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
-@router.message(F.text.casefold() == BTN_FINISH_SHIFT.casefold())
-async def close_shift(message: types.Message) -> None:
+async def close_shift(callback: types.CallbackQuery, state: FSMContext) -> None:
     """Обрабатывает закрытие смены и отправку сводки."""
 
-    user_id = message.from_user.id
+    await callback.answer()
+
+    user_id = callback.from_user.id
+    message = callback.message
     sheets = _resolve_service(None)
 
     await safe_delete(message)
@@ -433,6 +664,9 @@ async def close_shift(message: types.Message) -> None:
     )
     await message.answer(confirmation + "\nвозвращаю в главное меню…")
 
+    mark_shift_closed(user_id)
+    await state.set_state(ShiftState.IDLE)
+
     from features.main_menu import show_menu
 
-    await show_menu(message, service=sheets)
+    await show_menu(message, service=sheets, state=state)

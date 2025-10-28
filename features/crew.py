@@ -222,7 +222,14 @@ async def _return_to_shift_menu(message: types.Message, state: FSMContext) -> No
     row = data.get("row")
     await _clear_workers_message(message, state)
     await state.clear()
-    await _render_shift_menu(message, user_id, row)
+    await _render_shift_menu(
+        message,
+        user_id,
+        row,
+        state=state,
+        delete_trigger_message=False,
+        show_progress=False,
+    )
 
 
 async def _go_home(message: types.Message, state: FSMContext) -> None:
@@ -232,7 +239,7 @@ async def _go_home(message: types.Message, state: FSMContext) -> None:
 
     await _clear_workers_message(message, state)
     await state.clear()
-    await show_menu(message)
+    await show_menu(message, state=state)
 
 
 async def _refresh_drivers(state: FSMContext) -> list[str]:
@@ -253,23 +260,60 @@ async def _refresh_workers(state: FSMContext) -> list[str]:
     return workers
 
 
+async def _resolve_user_id(
+    message: types.Message,
+    state: FSMContext,
+    provided: int | None = None,
+) -> int | None:
+    """Определяет фактический user_id для запуска сценария."""
+
+    if provided is not None:
+        return provided
+
+    if message.from_user and not message.from_user.is_bot:
+        return message.from_user.id
+
+    data = await state.get_data()
+    for key in ("user_id", "_shift_user_id"):
+        candidate = data.get(key)
+        if isinstance(candidate, int):
+            return candidate
+        if isinstance(candidate, str) and candidate.isdigit():
+            return int(candidate)
+
+    if message.chat and message.chat.type == "private":
+        return message.chat.id
+    return None
+
+
 @router.message(Command("crew"))
-async def start_crew(message: types.Message, state: FSMContext) -> None:
+async def start_crew(
+    message: types.Message,
+    state: FSMContext,
+    *,
+    user_id: int | None = None,
+) -> None:
     """Запускает сценарий заполнения состава бригады."""
 
     await safe_delete(message)
-    user_id = message.from_user.id
+    actual_user_id = await _resolve_user_id(message, state, user_id)
+    if actual_user_id is None:
+        await message.answer(
+            "Не удалось определить пользователя. Начните смену заново через главное меню."
+        )
+        await state.clear()
+        return
     service = _get_service()
 
     try:
-        row = await asyncio.to_thread(service.get_shift_row_index_for_user, user_id)
+        row = await asyncio.to_thread(service.get_shift_row_index_for_user, actual_user_id)
         if row is None:
-            row = await asyncio.to_thread(service.open_shift_for_user, user_id)
+            row = await asyncio.to_thread(service.open_shift_for_user, actual_user_id)
         drivers = await asyncio.to_thread(service.list_active_drivers)
     except Exception:  # noqa: BLE001
         logger.exception(
             "Не удалось подготовить данные раздела «Бригада» (user_id=%s)",
-            user_id,
+            actual_user_id,
         )
         await message.answer(
             "Не удалось открыть раздел «Бригада». Попробуйте позже или обратитесь к координатору."
@@ -278,7 +322,7 @@ async def start_crew(message: types.Message, state: FSMContext) -> None:
         return
 
     await state.update_data(
-        user_id=user_id,
+        user_id=actual_user_id,
         row=row,
         drivers=drivers,
         driver_page=0,
@@ -924,5 +968,15 @@ async def handle_confirm(message: types.Message, state: FSMContext) -> None:
 
     await _clear_workers_message(message, state)
     await state.clear()
-    await message.answer("состав бригады сохранён.")
-    await _render_shift_menu(message, user_id, row)
+    from features.shift_menu import mark_mode_done
+
+    mark_mode_done(user_id, "crew")
+    await message.answer("состав бригады сохранён. возвращаю в меню смены…")
+    await _render_shift_menu(
+        message,
+        user_id,
+        row,
+        state=state,
+        delete_trigger_message=False,
+        show_progress=False,
+    )

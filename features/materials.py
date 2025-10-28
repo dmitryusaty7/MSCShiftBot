@@ -95,16 +95,53 @@ class MaterialsFSM(StatesGroup):
     confirm = State()
 
 
+async def _resolve_user_id(
+    message: types.Message,
+    state: FSMContext,
+    provided: int | None = None,
+) -> int | None:
+    """Определяет фактический user_id для запуска сценария."""
+
+    if provided is not None:
+        return provided
+
+    if message.from_user and not message.from_user.is_bot:
+        return message.from_user.id
+
+    data = await state.get_data()
+    for key in ("user_id", "_shift_user_id"):
+        candidate = data.get(key)
+        if isinstance(candidate, int):
+            return candidate
+        if isinstance(candidate, str) and candidate.isdigit():
+            return int(candidate)
+
+    if message.chat and message.chat.type == "private":
+        return message.chat.id
+    return None
+
+
 @router.message(Command("materials"))
-async def start_materials(message: types.Message, state: FSMContext) -> None:
+async def start_materials(
+    message: types.Message,
+    state: FSMContext,
+    *,
+    user_id: int | None = None,
+) -> None:
     """Запускает процесс заполнения раздела материалов."""
 
     await safe_delete(message)
-    user_id = message.from_user.id
+    actual_user_id = await _resolve_user_id(message, state, user_id)
+    if actual_user_id is None:
+        await message.answer(
+            "Не удалось определить пользователя. Начните смену заново через главное меню."
+        )
+        await state.clear()
+        return
     sheets = _get_sheets_service()
-    row = await asyncio.to_thread(sheets.get_shift_row_index_for_user, user_id)
+    row = await asyncio.to_thread(sheets.get_shift_row_index_for_user, actual_user_id)
     if row is None:
-        row = await asyncio.to_thread(sheets.open_shift_for_user, user_id)
+        row = await asyncio.to_thread(sheets.open_shift_for_user, actual_user_id)
 
     day_title = _format_day_title(dt.datetime.now().astimezone().date())
 
@@ -118,11 +155,18 @@ async def start_materials(message: types.Message, state: FSMContext) -> None:
             "и попробуйте позже или обратитесь к администратору."
         )
         await state.clear()
-        await _render_shift_menu(message, user_id, row)
+        await _render_shift_menu(
+            message,
+            actual_user_id,
+            row,
+            state=state,
+            delete_trigger_message=False,
+            show_progress=False,
+        )
         return
 
     await state.update_data(
-        user_id=user_id,
+        user_id=actual_user_id,
         row=row,
         photos=[],
         day_title=day_title,
@@ -323,11 +367,19 @@ async def confirm_upload(message: types.Message, state: FSMContext) -> None:
         )
         return
 
-    await message.answer("📎 фото успешно загружены. возвращаю в главное меню…")
-    await state.clear()
-    from features.main_menu import show_menu
+    from features.shift_menu import mark_mode_done
 
-    await show_menu(message)
+    await message.answer("📎 фото успешно загружены. возвращаю в меню смены…")
+    await state.clear()
+    mark_mode_done(user_id, "materials")
+    await _render_shift_menu(
+        message,
+        user_id,
+        row,
+        state=state,
+        delete_trigger_message=False,
+        show_progress=False,
+    )
 
 
 @router.message(MaterialsFSM.photos)
@@ -343,8 +395,15 @@ async def exit_nav(message: types.Message, state: FSMContext, key: str) -> None:
     if key == BTN_HOME:
         from features.main_menu import show_menu
 
-        return await show_menu(message)
-    await _render_shift_menu(message, data.get("user_id"), data.get("row"))
+        return await show_menu(message, state=state)
+    await _render_shift_menu(
+        message,
+        data.get("user_id"),
+        data.get("row"),
+        state=state,
+        delete_trigger_message=False,
+        show_progress=False,
+    )
 
 
 def _ensure_bytes(downloaded) -> bytes:

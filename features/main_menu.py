@@ -7,6 +7,7 @@ import logging
 
 from aiogram import Router, types
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 
 from features.shift_menu import render_shift_menu
@@ -45,7 +46,10 @@ def _menu_keyboard() -> types.ReplyKeyboardMarkup:
 
 
 async def show_menu(
-    message: types.Message, service: SheetsService | None = None
+    message: types.Message,
+    service: SheetsService | None = None,
+    *,
+    state: FSMContext | None = None,
 ) -> None:
     """Отправляет пользователю основную панель с приветствием."""
 
@@ -78,18 +82,23 @@ async def show_menu(
         f"Здравствуйте, {fio_text}{suffix}\n\n"
         f"Смен закрыто: {profile.closed_shifts}"
     )
+    if state is not None:
+        from features.shift_menu import ShiftState, reset_shift_session
+
+        await state.set_state(ShiftState.IDLE)
+        reset_shift_session(user_id)
     await message.answer(text, reply_markup=_menu_keyboard())
 
 
 @router.message(Command("menu"))
-async def handle_menu_command(message: types.Message) -> None:
+async def handle_menu_command(message: types.Message, state: FSMContext) -> None:
     """Команда /menu для ручного открытия панели."""
 
-    await show_menu(message)
+    await show_menu(message, state=state)
 
 
 @router.message(lambda msg: msg.text == START_SHIFT_BTN)
-async def start_shift(message: types.Message) -> None:
+async def start_shift(message: types.Message, state: FSMContext) -> None:
     """Создаёт или подготавливает рабочую строку смены для пользователя."""
 
     user_id = message.from_user.id
@@ -109,6 +118,16 @@ async def start_shift(message: types.Message) -> None:
 
     try:
         try:
+            locked, _ = await asyncio.to_thread(
+                service.check_today_shift_lock, user_id
+            )
+            if locked:
+                await safe_delete(progress_message)
+                progress_message = None
+                await message.answer(
+                    "Смена уже закрыта сегодня. Новую смену можно открыть завтра."
+                )
+                return
             row_index = await asyncio.to_thread(
                 service.open_shift_for_user, user_id
             )
@@ -116,7 +135,7 @@ async def start_shift(message: types.Message) -> None:
             await safe_delete(progress_message)
             progress_message = None
             await message.answer(
-                "На сегодня все смены уже закрыты. Открывать смену можно только вручную."
+                "Смена уже закрыта сегодня. Новую смену можно открыть завтра."
             )
             return
         except Exception:  # noqa: BLE001
@@ -136,6 +155,7 @@ async def start_shift(message: types.Message) -> None:
             user_id,
             row_index,
             service=service,
+            state=state,
             delete_trigger_message=False,
             show_progress=True,
         )

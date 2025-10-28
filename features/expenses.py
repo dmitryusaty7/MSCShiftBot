@@ -121,19 +121,56 @@ def ship_choices_kb(ships: list[str]) -> types.ReplyKeyboardMarkup:
     return keyboard.as_markup(resize_keyboard=True)
 
 
+async def _resolve_user_id(
+    message: types.Message,
+    state: FSMContext,
+    provided: int | None = None,
+) -> int | None:
+    """Определяет фактический user_id вне зависимости от источника вызова."""
+
+    if provided is not None:
+        return provided
+
+    if message.from_user and not message.from_user.is_bot:
+        return message.from_user.id
+
+    data = await state.get_data()
+    for key in ("user_id", "_shift_user_id"):
+        candidate = data.get(key)
+        if isinstance(candidate, int):
+            return candidate
+        if isinstance(candidate, str) and candidate.isdigit():
+            return int(candidate)
+
+    if message.chat and message.chat.type == "private":
+        return message.chat.id
+    return None
+
+
 @router.message(Command("expenses"))
-async def start_expenses(message: types.Message, state: FSMContext) -> None:
+async def start_expenses(
+    message: types.Message,
+    state: FSMContext,
+    *,
+    user_id: int | None = None,
+) -> None:
     """Запускает сценарий заполнения раздела расходов."""
 
     await safe_delete(message)
-    user_id = message.from_user.id
+    actual_user_id = await _resolve_user_id(message, state, user_id)
+    if actual_user_id is None:
+        await message.answer(
+            "Не удалось определить пользователя. Начните смену заново через главное меню."
+        )
+        await state.clear()
+        return
     service = _get_service()
     row = await asyncio.to_thread(
-        service.get_shift_row_index_for_user, user_id
+        service.get_shift_row_index_for_user, actual_user_id
     )
     if row is None:
-        row = await asyncio.to_thread(service.open_shift_for_user, user_id)
-    await state.update_data(row=row, user_id=user_id)
+        row = await asyncio.to_thread(service.open_shift_for_user, actual_user_id)
+    await state.update_data(row=row, user_id=actual_user_id)
     await ask_ship(message, state)
 
 
@@ -464,11 +501,19 @@ async def confirm_save(message: types.Message, state: FSMContext) -> None:
         j=data.get("j", 0),
         k=data.get("k", 0),
     )
-    await state.clear()
-    await message.answer("раздел «расходы смены» сохранён ✅\nвозвращаю в главное меню…")
-    from features.main_menu import show_menu
+    from features.shift_menu import mark_mode_done
 
-    await show_menu(message)
+    await state.clear()
+    mark_mode_done(user_id, "expenses")
+    await message.answer("раздел «расходы смены» сохранён ✅\nвозвращаю в меню смены…")
+    await _render_shift_menu(
+        message,
+        user_id,
+        row,
+        state=state,
+        delete_trigger_message=False,
+        show_progress=False,
+    )
 
 
 async def exit_by_nav(message: types.Message, state: FSMContext, key: str) -> None:
@@ -479,6 +524,13 @@ async def exit_by_nav(message: types.Message, state: FSMContext, key: str) -> No
     if key == BTN_HOME:
         from features.main_menu import show_menu
 
-        await show_menu(message)
+        await show_menu(message, state=state)
         return
-    await _render_shift_menu(message, data.get("user_id"), data.get("row"))
+    await _render_shift_menu(
+        message,
+        data.get("user_id"),
+        data.get("row"),
+        state=state,
+        delete_trigger_message=False,
+        show_progress=False,
+    )
