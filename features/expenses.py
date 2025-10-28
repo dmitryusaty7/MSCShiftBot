@@ -464,11 +464,19 @@ async def confirm_save(message: types.Message, state: FSMContext) -> None:
         j=data.get("j", 0),
         k=data.get("k", 0),
     )
-    await state.clear()
-    await message.answer("раздел «расходы смены» сохранён ✅\nвозвращаю в главное меню…")
-    from features.main_menu import show_menu
+    from features.shift_menu import mark_mode_done
 
-    await show_menu(message)
+    await state.clear()
+    mark_mode_done(user_id, "expenses")
+    await message.answer("раздел «расходы смены» сохранён ✅\nвозвращаю в меню смены…")
+    await _render_shift_menu(
+        message,
+        user_id,
+        row,
+        state=state,
+        delete_trigger_message=False,
+        show_progress=False,
+    )
 
 
 async def exit_by_nav(message: types.Message, state: FSMContext, key: str) -> None:
@@ -479,6 +487,13 @@ async def exit_by_nav(message: types.Message, state: FSMContext, key: str) -> No
     if key == BTN_HOME:
         from features.main_menu import show_menu
 
-        await show_menu(message)
+        await show_menu(message, state=state)
         return
-    await _render_shift_menu(message, data.get("user_id"), data.get("row"))
+    await _render_shift_menu(
+        message,
+        data.get("user_id"),
+        data.get("row"),
+        state=state,
+        delete_trigger_message=False,
+        show_progress=False,
+    )
