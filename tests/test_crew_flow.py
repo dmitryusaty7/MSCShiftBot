@@ -12,7 +12,6 @@ from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
 
 from bot.handlers import crew, shift_menu
 from bot.handlers.crew import CrewState
-from bot.handlers.crew_norm import norm_text
 from bot.keyboards.crew_reply import (
     CONFIRM_BUTTON,
     MENU_BUTTON,
@@ -22,8 +21,10 @@ from bot.keyboards.crew_reply import (
     make_intro_kb,
     make_workers_kb,
 )
+from bot.keyboards.crew_inline import WORKER_TOGGLE_PREFIX, make_workers_inline_summary
 from bot.services import CrewWorker
 from bot.utils.cleanup import reset_history
+from bot.utils.textnorm import norm_text
 
 
 def _flatten(markup: ReplyKeyboardMarkup) -> list[str]:
@@ -66,6 +67,31 @@ def test_workers_keyboard_shows_confirm_only_with_selection() -> None:
     markup_full, _ = make_workers_kb(workers, [1, 3])
     texts_full = _flatten(markup_full)
     assert CONFIRM_BUTTON in texts_full
+
+
+def test_inline_summary_contains_toggle_buttons() -> None:
+    driver = CrewWorker(worker_id=1, name="Иванов И.")
+    workers = [
+        CrewWorker(worker_id=1, name="Рабочий А"),
+        CrewWorker(worker_id=2, name="Рабочий Б"),
+    ]
+
+    text, markup = make_workers_inline_summary(driver, workers)
+    assert "Иванов" in text
+    assert "Рабочий А" in text
+    assert markup is not None
+
+    buttons = [
+        button
+        for row in markup.inline_keyboard
+        for button in row
+    ]
+
+    assert all(button.callback_data.startswith(WORKER_TOGGLE_PREFIX) for button in buttons)
+    assert any(button.text.startswith("✖") for button in buttons)
+
+    _, empty_markup = make_workers_inline_summary(driver, [])
+    assert empty_markup is None
 
 
 class StubCrewService:
@@ -173,6 +199,15 @@ class DummyMessage:
         await self.bot.delete_message(self.chat.id, self.message_id)
 
 
+class DummyCallback:
+    def __init__(self, message: DummyMessage, data: str) -> None:
+        self.message = message
+        self.data = data
+
+    async def answer(self, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
+        return None
+
+
 class StubFSMContext:
     def __init__(self) -> None:
         self._state: str | None = None
@@ -212,6 +247,14 @@ async def _run_flow(monkeypatch) -> tuple[StubCrewService, StubBot]:
     original_service = crew._service
     crew._service = service
 
+    original_flash = crew.flash_message
+
+    async def fake_flash(target, text, ttl=2.0, **kwargs):  # noqa: ANN001
+        base = getattr(target, "message", target)
+        if base is None:
+            return None
+        return await base.answer(text)
+
     bot = StubBot()
     state = StubFSMContext()
 
@@ -219,6 +262,7 @@ async def _run_flow(monkeypatch) -> tuple[StubCrewService, StubBot]:
         await message.answer("Меню смены\n👥 Состав бригады — ✅ готово")
 
     monkeypatch.setattr(shift_menu, "render_shift_menu", fake_render_menu)
+    monkeypatch.setattr(crew, "flash_message", fake_flash)
 
     try:
         start_message = DummyMessage(
@@ -278,6 +322,21 @@ async def _run_flow(monkeypatch) -> tuple[StubCrewService, StubBot]:
         data = await state.get_data()
         assert data.get("crew_selected_worker_ids") == [2]
 
+        summary_id = data.get("crew_list_msg_id")
+        assert isinstance(summary_id, int)
+        summary_message = bot._storage[(chat_id, summary_id)]
+
+        callback_remove = DummyCallback(summary_message, f"{WORKER_TOGGLE_PREFIX}2")
+        await crew.handle_workers_inline(callback_remove, state)
+        data = await state.get_data()
+        assert data.get("crew_selected_worker_ids") == []
+
+        summary_message = bot._storage[(chat_id, summary_id)]
+        callback_add = DummyCallback(summary_message, f"{WORKER_TOGGLE_PREFIX}2")
+        await crew.handle_workers_inline(callback_add, state)
+        data = await state.get_data()
+        assert data.get("crew_selected_worker_ids") == [2]
+
         confirm_message = DummyMessage(
             bot=bot,
             chat_id=chat_id,
@@ -293,6 +352,7 @@ async def _run_flow(monkeypatch) -> tuple[StubCrewService, StubBot]:
         return service, bot
     finally:
         crew._service = original_service
+        crew.flash_message = original_flash
 
 
 def test_full_reply_flow(monkeypatch) -> None:

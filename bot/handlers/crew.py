@@ -11,6 +11,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
+from bot.keyboards.crew_inline import WORKER_TOGGLE_PREFIX, make_workers_inline_summary
 from bot.keyboards.crew_reply import (
     ADD_DRIVER_BUTTON,
     BACK_BUTTON,
@@ -24,10 +25,10 @@ from bot.keyboards.crew_reply import (
     make_workers_kb,
 )
 from bot.services import CrewSheetsService, CrewWorker
-from bot.utils.cleanup import cleanup_screen, send_screen_message
+from bot.utils.cleanup import cleanup_screen, remember_message, send_screen_message
 from bot.utils.flash import flash_message, start_mode_flash
+from bot.utils.textnorm import norm_text
 from features.utils.messaging import safe_delete
-from .crew_norm import norm_text
 
 router = Router(name="crew")
 logger = logging.getLogger(__name__)
@@ -153,7 +154,61 @@ def _selected_ids(data: dict[str, Any]) -> list[int]:
     return selected
 
 
+async def _clear_inline_summary(message: types.Message, state: FSMContext) -> None:
+    """Удаляет сообщение со сводкой выбранных рабочих, если оно есть."""
+
+    data = await state.get_data()
+    list_id = data.get("crew_list_msg_id")
+    if not isinstance(list_id, int):
+        return
+
+    try:
+        await message.bot.delete_message(message.chat.id, list_id)
+    except TelegramBadRequest:
+        logger.debug("Сообщение со сводкой уже удалено", exc_info=False)
+    except Exception:  # noqa: BLE001
+        logger.warning("Не удалось удалить сообщение сводки", exc_info=True)
+
+    await state.update_data(crew_list_msg_id=None)
+
+
+async def render_workers_inline_list(message: types.Message, state: FSMContext) -> None:
+    """Отрисовывает (или обновляет) inline-сводку выбранных рабочих."""
+
+    data = await state.get_data()
+    drivers = _deserialize_workers(data.get("crew_drivers"))
+    workers = _deserialize_workers(data.get("crew_workers"))
+
+    driver_id = data.get("crew_driver_id") if isinstance(data.get("crew_driver_id"), int) else None
+    selected_ids = set(_selected_ids(data))
+
+    driver = next((item for item in drivers if item.worker_id == driver_id), None)
+    selected_workers = [worker for worker in workers if worker.worker_id in selected_ids]
+
+    text, markup = make_workers_inline_summary(driver, selected_workers)
+
+    list_id = data.get("crew_list_msg_id")
+    if isinstance(list_id, int):
+        try:
+            await message.bot.edit_message_text(
+                text,
+                chat_id=message.chat.id,
+                message_id=list_id,
+                reply_markup=markup,
+            )
+            return
+        except TelegramBadRequest:
+            logger.debug("Не удалось обновить сообщение сводки, отправляю новое.")
+        except Exception:  # noqa: BLE001
+            logger.warning("Ошибка при обновлении сводки", exc_info=True)
+
+    summary = await message.answer(text, reply_markup=markup)
+    remember_message(message.chat.id, summary.message_id)
+    await state.update_data(crew_list_msg_id=summary.message_id)
+
+
 async def _enter_intro(message: types.Message, state: FSMContext) -> None:
+    await _clear_inline_summary(message, state)
     await state.update_data(crew_map_buttons={})
     await state.set_state(CrewState.INTRO)
     await show_screen(
@@ -168,6 +223,7 @@ async def _enter_intro(message: types.Message, state: FSMContext) -> None:
 
 
 async def _enter_driver_step(message: types.Message, state: FSMContext) -> None:
+    await _clear_inline_summary(message, state)
     data = await state.get_data()
     drivers = _deserialize_workers(data.get("crew_drivers"))
     if not drivers:
@@ -219,6 +275,8 @@ async def _enter_workers_step(message: types.Message, state: FSMContext) -> None
         reply_markup=markup,
     )
 
+    await render_workers_inline_list(message, state)
+
 
 async def _save_and_finish(message: types.Message, state: FSMContext) -> None:
     data = await state.get_data()
@@ -239,6 +297,7 @@ async def _save_and_finish(message: types.Message, state: FSMContext) -> None:
         await _enter_workers_step(message, state)
         return
 
+    await _clear_inline_summary(message, state)
     await show_screen(
         message,
         state,
@@ -315,6 +374,7 @@ async def _return_to_menu(message: types.Message, state: FSMContext) -> None:
     user_id = data.get("crew_user_id")
     row = data.get("crew_row")
 
+    await _clear_inline_summary(message, state)
     await cleanup_screen(message.bot, message.chat.id, keep_start=False)
     await state.clear()
 
@@ -356,6 +416,7 @@ async def start_crew(message: types.Message, state: FSMContext, user_id: int) ->
         crew_selected_worker_ids=[],
         crew_map_buttons={},
         crew_screen_id=None,
+        crew_list_msg_id=None,
     )
 
     await state.set_state(CrewState.INTRO)
@@ -389,6 +450,7 @@ async def handle_driver_step(message: types.Message, state: FSMContext) -> None:
     text_norm = norm_text(text)
 
     if text_norm == norm_text(MENU_BUTTON):
+        await _return_to_menu(message, state)
         return
     if text_norm == norm_text(BACK_BUTTON):
         await _enter_intro(message, state)
@@ -431,6 +493,7 @@ async def handle_workers_step(message: types.Message, state: FSMContext) -> None
     text_norm = norm_text(text)
 
     if text_norm == norm_text(MENU_BUTTON):
+        await _return_to_menu(message, state)
         return
     if text_norm == norm_text(BACK_BUTTON):
         await _enter_driver_step(message, state)
@@ -471,3 +534,68 @@ async def handle_workers_step(message: types.Message, state: FSMContext) -> None
 
     await state.update_data(crew_selected_worker_ids=sorted(selected_set))
     await _enter_workers_step(message, state)
+
+
+@router.callback_query(F.data.startswith(WORKER_TOGGLE_PREFIX))
+async def handle_workers_inline(callback: types.CallbackQuery, state: FSMContext) -> None:
+    """Обрабатывает удаление/добавление рабочего из inline-сводки."""
+
+    message = callback.message
+    if message is None:
+        await callback.answer()
+        return
+
+    data = await state.get_data()
+    raw = callback.data or ""
+    try:
+        worker_id = int(raw.split(":")[-1])
+    except ValueError:
+        await callback.answer()
+        return
+
+    selected_set = set(_selected_ids(data))
+    workers = _deserialize_workers(data.get("crew_workers"))
+    worker_name = next((item.name for item in workers if item.worker_id == worker_id), str(worker_id))
+
+    if worker_id in selected_set:
+        selected_set.remove(worker_id)
+        tip = f"✖ удалён {worker_name}"
+    else:
+        selected_set.add(worker_id)
+        tip = f"✔ добавлен {worker_name}"
+
+    await state.update_data(crew_selected_worker_ids=sorted(selected_set))
+    await callback.answer()
+    await flash_message(callback, tip, ttl=1.0)
+    await _enter_workers_step(message, state)
+
+
+# ---------------------------------------------------------------------------
+# Совместимость с предыдущими версиями (обёртки публичных функций)
+# ---------------------------------------------------------------------------
+
+
+async def enter_driver_step(message: types.Message, state: FSMContext) -> None:
+    """Совместимый алиас для PR #21."""
+
+    await _enter_driver_step(message, state)
+
+
+async def enter_workers_step(message: types.Message, state: FSMContext) -> None:
+    """Совместимый алиас для PR #21."""
+
+    await _enter_workers_step(message, state)
+
+
+__all__ = [
+    "CrewState",
+    "start_crew",
+    "handle_intro_start",
+    "handle_driver_step",
+    "handle_workers_step",
+    "handle_workers_inline",
+    "handle_intro_menu",
+    "enter_driver_step",
+    "enter_workers_step",
+    "render_workers_inline_list",
+]
