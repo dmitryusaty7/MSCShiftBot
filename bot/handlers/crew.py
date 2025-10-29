@@ -139,6 +139,16 @@ def _deserialize_workers(raw: Iterable[dict[str, Any]] | None) -> list[CrewWorke
     return workers
 
 
+def _find_worker_by_name(workers: Sequence[CrewWorker], name: str) -> CrewWorker | None:
+    """Возвращает сотрудника по имени с учётом нормализации."""
+
+    target = _norm(name)
+    for worker in workers:
+        if _norm(worker.name) == target:
+            return worker
+    return None
+
+
 def _resolve_choice(mapping: dict[str, int], text: str | None) -> int | None:
     target = _norm(text)
     for key, value in mapping.items():
@@ -292,7 +302,7 @@ async def _finalize_driver_addition(message: types.Message, state: FSMContext) -
         return
 
     drivers = await _refresh_driver_directory(state)
-    driver = next((item for item in drivers if item.name == full_name), None)
+    driver = _find_worker_by_name(drivers, full_name)
     await state.update_data(
         crew_driver_id=driver.worker_id if isinstance(driver, CrewWorker) else None,
         crew_driver_name=driver.name if isinstance(driver, CrewWorker) else full_name,
@@ -383,7 +393,7 @@ async def _finalize_worker_addition(message: types.Message, state: FSMContext) -
 
     workers = await _refresh_worker_directory(state)
     selected_set = set(_selected_ids(data))
-    new_worker = next((item for item in workers if item.name == full_name), None)
+    new_worker = _find_worker_by_name(workers, full_name)
     if isinstance(new_worker, CrewWorker):
         selected_set.add(new_worker.worker_id)
 
