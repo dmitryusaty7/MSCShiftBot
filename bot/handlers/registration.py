@@ -7,7 +7,7 @@ from typing import Any
 
 from aiogram import Bot, F, Router, types
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command
+from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
@@ -20,6 +20,7 @@ from bot.keyboards.auth import (
     skip_button_kb,
     start_registration_kb,
 )
+from bot.utils.flash import flash_message
 from bot.validators.name import validate_name
 from features.main_menu import show_menu
 from services.env import require_env
@@ -78,13 +79,36 @@ def _get_spreadsheet_id() -> str:
     return require_env("SPREADSHEET_ID")
 
 
+async def _register_user_input(state: FSMContext, message_id: int) -> None:
+    """Добавляет идентификатор пользовательского сообщения в список для очистки."""
+
+    data = await state.get_data()
+    ids: list[int] = list(data.get("input_ids", []))
+    ids.append(message_id)
+    await state.update_data(input_ids=ids)
+
+
+async def _clear_user_inputs(
+    state: FSMContext, *, bot: types.Bot, chat_id: int
+) -> None:
+    """Удаляет все пользовательские сообщения, сохранённые для текущего шага."""
+
+    data = await state.get_data()
+    ids: list[int] = list(data.get("input_ids", []))
+    if not ids:
+        return
+    for message_id in ids:
+        await _safe_delete_message(bot, chat_id, message_id)
+    await state.update_data(input_ids=[])
+
+
 async def _store_prompt(
     source_message: types.Message, state: FSMContext, text: str, *, reply_markup: Any | None = None
 ) -> types.Message:
     """Отправляет новый вопрос и сохраняет его идентификатор в состоянии."""
 
     prompt = await source_message.answer(text, reply_markup=reply_markup)
-    await state.update_data(prompt_id=prompt.message_id)
+    await state.update_data(prompt_id=prompt.message_id, input_ids=[])
     return prompt
 
 
@@ -102,6 +126,7 @@ async def _handle_text_step(
 
     bot = message.bot
     chat_id = message.chat.id
+    await _register_user_input(state, message.message_id)
     try:
         value = validate_name(message.text or "")
     except ValueError as exc:
@@ -111,7 +136,7 @@ async def _handle_text_step(
         return
 
     await state.update_data(**{data_key: value})
-    await _safe_delete_message(bot, chat_id, message.message_id)
+    await _clear_user_inputs(state, bot=bot, chat_id=chat_id)
     await _clear_data_message(state, "prompt_id", bot=bot, chat_id=chat_id)
     await _clear_data_message(state, "error_id", bot=bot, chat_id=chat_id)
     await state.set_state(next_state)
@@ -127,6 +152,7 @@ async def _show_confirmation(message: types.Message, state: FSMContext) -> None:
     await _clear_data_message(state, "prompt_id", bot=bot, chat_id=chat_id)
     await _clear_data_message(state, "error_id", bot=bot, chat_id=chat_id)
     await _clear_data_message(state, "confirm_id", bot=bot, chat_id=chat_id)
+    await _clear_user_inputs(state, bot=bot, chat_id=chat_id)
 
     fio = " ".join(
         part
@@ -146,9 +172,16 @@ async def _show_confirmation(message: types.Message, state: FSMContext) -> None:
     await state.set_state(RegistrationState.confirm)
 
 
-@router.message(Command("start"))
+@router.message(CommandStart())
 async def handle_start(message: types.Message, state: FSMContext) -> None:
     """Точка входа: проверка статуса и запуск регистрации."""
+
+    try:
+        await message.delete()
+    except TelegramBadRequest:
+        pass
+
+    await flash_message(message, "🔍 Проверяю доступ…", ttl=1.5)
 
     user_id = message.from_user.id
     service = _get_service()
@@ -167,17 +200,34 @@ async def handle_start(message: types.Message, state: FSMContext) -> None:
 
     status_normalized = (status or "").strip().casefold() if status else ""
 
-    if row and status_normalized not in {"архив", "ban"}:
-        await message.answer("Добро пожаловать! Вы уже зарегистрированы. Открываю панель.")
-        await show_menu(message, service=service, state=state)
-        return
-
     if status_normalized == "архив":
         await message.answer("Ваш доступ отключён. Обратитесь к координатору (статус: Архив).")
         return
 
     if status_normalized == "ban":
         await message.answer("Ваш доступ заблокирован. Обратитесь к координатору для уточнения статуса.")
+        return
+
+    profile = None
+    if row and status_normalized not in {"архив", "ban"}:
+        try:
+            profile = await asyncio.to_thread(
+                service.get_user_profile,
+                user_id,
+                spreadsheet_id,
+                required=False,
+            )
+        except RuntimeError:
+            profile = None
+        except Exception:  # noqa: BLE001
+            await message.answer(
+                "Не удалось проверить регистрацию. Попробуйте повторить попытку позже."
+            )
+            return
+
+    if profile:
+        await message.answer("Добро пожаловать! Вы уже зарегистрированы. Открываю панель.")
+        await show_menu(message, service=service, state=state)
         return
 
     await state.clear()
@@ -238,9 +288,10 @@ async def process_patronymic(message: types.Message, state: FSMContext) -> None:
     bot = message.bot
     chat_id = message.chat.id
     text = (message.text or "").strip()
+    await _register_user_input(state, message.message_id)
     if text.casefold() == "пропустить":
         await state.update_data(patronymic="")
-        await _safe_delete_message(bot, chat_id, message.message_id)
+        await _clear_user_inputs(state, bot=bot, chat_id=chat_id)
         await _show_confirmation(message, state)
         return
     try:
@@ -252,7 +303,7 @@ async def process_patronymic(message: types.Message, state: FSMContext) -> None:
         return
 
     await state.update_data(patronymic=value)
-    await _safe_delete_message(bot, chat_id, message.message_id)
+    await _clear_user_inputs(state, bot=bot, chat_id=chat_id)
     await _show_confirmation(message, state)
 
 
@@ -289,6 +340,7 @@ async def retry_registration(callback: types.CallbackQuery, state: FSMContext) -
         last_name="",
         first_name="",
         patronymic="",
+        input_ids=[],
     )
     await _store_prompt(message, state, "Введите вашу Фамилию (только буквы).")
 
@@ -344,4 +396,14 @@ async def confirm_registration(callback: types.CallbackQuery, state: FSMContext)
     await state.clear()
     await callback.message.edit_reply_markup()
     await message.answer("Регистрация завершена. Статус: Активен. Открываю панель.")
+    await flash_message(message, "✅ Регистрация завершена", ttl=2.0)
+
+    try:
+        await asyncio.to_thread(service.get_user_profile, user_id)
+    except Exception:  # noqa: BLE001
+        await message.answer(
+            "Профиль сохранён, но открыть меню не удалось. Воспользуйтесь командой /menu немного позже."
+        )
+        return
+
     await show_menu(message, service=service, state=state)

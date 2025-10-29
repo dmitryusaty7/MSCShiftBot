@@ -480,15 +480,20 @@ class SheetsService:
     # ---------- Работа с рабочими листами смен ----------
 
     def get_user_profile(
-        self, telegram_id: int, spreadsheet_id: Optional[str] = None
-    ) -> UserProfile:
+        self,
+        telegram_id: int,
+        spreadsheet_id: Optional[str] = None,
+        required: bool = True,
+    ) -> UserProfile | None:
         """Возвращает профиль пользователя из листа «Данные» по Telegram ID."""
 
         sid = spreadsheet_id or require_env("SPREADSHEET_ID")
         ws_data = self._get_worksheet(SHEET_DATA, sid)
         row = self._find_user_row_in_data(ws_data, telegram_id)
         if not row:
-            raise RuntimeError("пользователь не найден в листе «Данные»")
+            if required:
+                raise RuntimeError("пользователь не найден в листе «Данные»")
+            return None
 
         first_cell = retry(lambda: ws_data.acell(f"C{row}"))
         middle_cell = retry(lambda: ws_data.acell(f"D{row}"))
@@ -509,12 +514,13 @@ class SheetsService:
         except ValueError:
             closed = 0
 
-        return UserProfile(
+        profile = UserProfile(
             telegram_id=telegram_id,
             fio=fio,
             closed_shifts=closed,
             fio_compact=fio_compact,
         )
+        return profile
 
     def get_active_ships(
         self, spreadsheet_id: Optional[str] = None

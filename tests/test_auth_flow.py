@@ -84,6 +84,9 @@ class DummyMessage:
     async def edit_reply_markup(self, reply_markup=None) -> None:
         await self.bot.edit_message_reply_markup(self.chat.id, self.message_id, reply_markup=reply_markup)
 
+    async def delete(self) -> None:
+        await self.bot.delete_message(self.chat.id, self.message_id)
+
 
 class DummyCallbackQuery:
     """Фиктивный callback-query для проверки inline-навигации."""
@@ -133,6 +136,8 @@ class StubSheetsService:
         self.saved: list[tuple[int, str, str, str]] = []
         self.existing_row: tuple[int | None, str | None] = (None, None)
         self.duplicate = False
+        self.profile: object | None = None
+        self.profile_error: Exception | None = None
 
     def find_row_by_telegram_id(self, spreadsheet_id: str, telegram_id: int) -> tuple[int | None, str | None]:
         return self.existing_row
@@ -149,7 +154,22 @@ class StubSheetsService:
         middle: str,
     ) -> int:
         self.saved.append((telegram_id, last, first, middle))
+        self.profile = SimpleNamespace(telegram_id=telegram_id, fio=f"{last} {first}")
         return 42
+
+    def get_user_profile(
+        self,
+        telegram_id: int,
+        spreadsheet_id: str | None = None,
+        required: bool = True,
+    ) -> object | None:
+        if self.profile_error:
+            raise self.profile_error
+        if self.profile is None:
+            if required:
+                raise RuntimeError("not-found")
+            return None
+        return self.profile
 
 
 @pytest.fixture(autouse=True)
@@ -170,6 +190,20 @@ def stub_service(monkeypatch) -> StubSheetsService:
 
     fake_show_menu.calls: list[tuple[DummyMessage, StubSheetsService, str | None]] = []
     monkeypatch.setattr(registration, "show_menu", fake_show_menu)
+
+    async def fake_flash(
+        message,
+        text,
+        *,
+        ttl: float = 2.0,
+        reply_markup=None,
+        disable_notification=None,
+    ):  # noqa: ANN001
+        fake_flash.calls.append((text, ttl))
+        return await message.answer(text, reply_markup=reply_markup)
+
+    fake_flash.calls: list[tuple[str, float]] = []
+    monkeypatch.setattr(registration, "flash_message", fake_flash)
     return service
 
 
@@ -208,6 +242,8 @@ async def _successful_registration_flow(stub_service: StubSheetsService) -> None
     assert await state.get_state() == RegistrationState.start.state
     start_message = bot.sent_messages[-1]
     assert start_message.text == "Чтобы начать регистрацию, нажмите кнопку ниже."
+    assert any(msg.text == "🔍 Проверяю доступ…" for msg in bot.sent_messages)
+    assert (chat_id, 500) in bot.deleted
 
     callback_start = DummyCallbackQuery(bot=bot, message=start_message, user_id=user_id, data=START_PAYLOAD)
     await registration.start_registration(callback_start, state)
@@ -246,9 +282,11 @@ async def _successful_registration_flow(stub_service: StubSheetsService) -> None
 
     assert stub_service.saved == [(user_id, "Иванов", "Иван", "Иванович")]
     assert any(msg.text == "Регистрация завершена. Статус: Активен. Открываю панель." for msg in bot.sent_messages)
+    assert any(msg.text == "✅ Регистрация завершена" for msg in bot.sent_messages)
     assert await state.get_state() is None
     assert bot.edited  # клавиатура подтверждения удалена
     assert registration.show_menu.calls  # type: ignore[attr-defined]
+    assert registration.flash_message.calls  # type: ignore[attr-defined]
 
 
 def test_successful_registration_flow(stub_service: StubSheetsService):
@@ -257,12 +295,15 @@ def test_successful_registration_flow(stub_service: StubSheetsService):
 
 async def _existing_user_shortcuts_to_menu(stub_service: StubSheetsService) -> None:
     stub_service.existing_row = (10, "Активен")
+    stub_service.profile = SimpleNamespace(telegram_id=77)
     bot = StubBot()
     state = StubFSMContext()
     message = DummyMessage(bot=bot, user_id=77, chat_id=77, message_id=600, text="/start")
 
     await registration.handle_start(message, state)
-    assert bot.sent_messages[0].text == "Добро пожаловать! Вы уже зарегистрированы. Открываю панель."
+    assert (77, 600) in bot.deleted
+    assert bot.sent_messages[0].text == "🔍 Проверяю доступ…"
+    assert bot.sent_messages[1].text == "Добро пожаловать! Вы уже зарегистрированы. Открываю панель."
     assert registration.show_menu.calls  # type: ignore[attr-defined]
     assert await state.get_state() is None
 
@@ -295,6 +336,8 @@ async def _invalid_last_name_shows_and_clears_error(stub_service: StubSheetsServ
         state,
     )
     assert any(deleted_id == error_message.message_id for (_, deleted_id) in bot.deleted)
+    assert (chat_id, 701) in bot.deleted
+    assert (chat_id, 702) in bot.deleted
     assert await state.get_state() == RegistrationState.first_name.state
 
 
