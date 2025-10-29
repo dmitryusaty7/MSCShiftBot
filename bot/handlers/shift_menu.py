@@ -406,7 +406,7 @@ async def handle_expenses(message: types.Message, state: FSMContext) -> None:
         message,
         state,
         mode=Mode.EXPENSES,
-        module_path="features.expenses",
+        module_path="bot.handlers.expenses",
         func_name="start_expenses",
     )
 
@@ -419,7 +419,7 @@ async def handle_materials(message: types.Message, state: FSMContext) -> None:
         message,
         state,
         mode=Mode.MATERIALS,
-        module_path="features.materials",
+        module_path="bot.handlers.materials",
         func_name="start_materials",
     )
 
