@@ -18,6 +18,7 @@ from bot.keyboards.dashboard import (
     FINISH_SHIFT_BUTTON,
     shift_menu_keyboard,
 )
+from bot.utils.cleanup import send_screen_message
 from bot.utils.flash import flash_message
 from features.utils.locks import acquire_user_lock, release_user_lock
 from features.utils.messaging import safe_delete
@@ -242,6 +243,7 @@ async def render_shift_menu(
     delete_trigger_message: bool = False,
     show_loading: bool = False,
     show_progress: bool = True,
+    use_screen_message: bool = False,
 ) -> None:
     """Отображает меню смены с учётом прогресса заполнения."""
 
@@ -360,9 +362,15 @@ async def render_shift_menu(
         show_finish=all(session.modes.values()) and not session.closed,
     )
 
-    menu_message = await message.answer(
-        "\n".join(_menu_lines(session)), reply_markup=markup
-    )
+    lines = "\n".join(_menu_lines(session))
+    if use_screen_message:
+        menu_message = await send_screen_message(
+            message,
+            lines,
+            reply_markup=markup,
+        )
+    else:
+        menu_message = await message.answer(lines, reply_markup=markup)
 
     if state is not None:
         await state.update_data(

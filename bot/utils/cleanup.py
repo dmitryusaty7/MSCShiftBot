@@ -18,6 +18,7 @@ __all__ = [
     "remember_message",
     "remember_messages",
     "reset_history",
+    "send_screen_message",
 ]
 
 logger = logging.getLogger(__name__)
@@ -78,3 +79,23 @@ async def cleanup_screen(
             logger.debug("Сообщение %s уже удалено", message_id)
         except Exception:  # noqa: BLE001
             logger.warning("Не удалось удалить сообщение %s", message_id, exc_info=True)
+
+
+async def send_screen_message(
+    message: types.Message,
+    text: str,
+    *,
+    reply_markup=None,
+    parse_mode: str | None = None,
+    disable_web_page_preview: bool | None = None,
+) -> types.Message:
+    """Отправляет сообщение-экран и запоминает его для последующей очистки."""
+
+    screen = await message.answer(
+        text,
+        reply_markup=reply_markup,
+        parse_mode=parse_mode,
+        disable_web_page_preview=disable_web_page_preview,
+    )
+    remember_message(message.chat.id, screen.message_id)
+    return screen
