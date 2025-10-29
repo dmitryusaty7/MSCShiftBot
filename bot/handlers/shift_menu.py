@@ -226,7 +226,7 @@ def _menu_lines(session: ShiftSession) -> list[str]:
     ]
     if session.closed:
         lines.append(
-            "Смена уже закрыта. Вернитесь в главное меню, чтобы открыть новую смену завтра."
+            "Смена уже закрыта. Вернитесь в главную панель, чтобы открыть новую смену завтра."
         )
     return lines
 
@@ -239,6 +239,7 @@ async def render_shift_menu(
     *,
     state: FSMContext | None = None,
     delete_trigger_message: bool = False,
+    show_loading: bool = False,
     show_progress: bool = True,
 ) -> None:
     """Отображает меню смены с учётом прогресса заполнения."""
@@ -248,11 +249,31 @@ async def render_shift_menu(
     if delete_trigger_message:
         await safe_delete(message)
 
+    loading_flash = None
+    if show_loading:
+        try:
+            loading_flash = await flash_message(
+                message, "Загружаю…", ttl=2.0
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Не удалось отправить flash перед меню смены (user_id=%s)",
+                user_id,
+                exc_info=True,
+            )
+
     loader = None
     if show_progress:
-        loader = await flash_message(
-            message, "⏳ Проверяю статус смены. Подождите…", ttl=2.0
-        )
+        try:
+            loader = await flash_message(
+                message, "⏳ Проверяю статус смены. Подождите…", ttl=2.0
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Не удалось отправить сообщение о проверке прогресса (user_id=%s)",
+                user_id,
+                exc_info=True,
+            )
 
     target_row = row
     lock = None
@@ -281,6 +302,7 @@ async def render_shift_menu(
         if lock is not None:
             release_user_lock(lock)
         await safe_delete(loader)
+        await safe_delete(loading_flash)
 
     if target_row is None:
         await message.answer(
@@ -394,7 +416,7 @@ async def _ensure_session(user_id: int) -> ShiftSession | None:
 
 @router.message(ShiftState.ACTIVE, F.text == SHIFT_BACK_BUTTON)
 async def handle_back_to_dashboard(message: types.Message, state: FSMContext) -> None:
-    """Возвращает пользователя в главное меню."""
+    """Возвращает пользователя в главную панель."""
 
     from bot.handlers.dashboard import show_dashboard
 
@@ -422,7 +444,7 @@ async def _close_shift(
     state: FSMContext,
     session: ShiftSession,
 ) -> None:
-    """Выполняет закрытие смены и возвращает пользователя в главное меню."""
+    """Выполняет закрытие смены и возвращает пользователя в главную панель."""
 
     user_id = message.from_user.id
     sheets = _resolve_service(None)
@@ -430,7 +452,7 @@ async def _close_shift(
     row = session.row
     if not row:
         await message.answer(
-            "Рабочая строка не найдена. Начните смену заново через главное меню."
+            "Рабочая строка не найдена. Начните смену заново через главную панель."
         )
         return
 
@@ -538,7 +560,7 @@ async def _close_shift(
         if group_sent
         else "Смена закрыта."
     )
-    await message.answer(confirmation + "\nВозвращаю в главное меню…")
+    await message.answer(confirmation + "\nВозвращаю в главную панель…")
 
     mark_shift_closed(user_id)
     if state is not None:

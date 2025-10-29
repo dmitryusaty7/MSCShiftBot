@@ -8,7 +8,6 @@ from aiogram.utils.keyboard import ReplyKeyboardBuilder
 __all__ = [
     "ReplyKeyboardRemove",
     "START_SHIFT_BUTTON",
-    "GUIDE_BUTTON",
     "SHIFT_BACK_BUTTON",
     "FINISH_SHIFT_BUTTON",
     "expenses_button_text",
@@ -19,12 +18,11 @@ __all__ = [
 ]
 
 START_SHIFT_BUTTON = "🚀 Начать оформление смены"
-GUIDE_BUTTON = "📘 Руководство"
 
 EXPENSES_PREFIX = "🧾 Расходы"
 MATERIALS_PREFIX = "📦 Материалы"
 CREW_PREFIX = "👥 Состав бригады"
-SHIFT_BACK_BUTTON = "⬅ В главное меню"
+SHIFT_BACK_BUTTON = "🏠 В главную панель"
 FINISH_SHIFT_BUTTON = "✅ Завершить смену"
 
 
@@ -52,14 +50,12 @@ def crew_button_text(done: bool) -> str:
     return f"{CREW_PREFIX} — {_status_badge(done)}"
 
 
-def dashboard_keyboard(*, include_guide: bool = False) -> ReplyKeyboardMarkup:
-    """Формирует клавиатуру главной панели с кнопками запуска смены."""
+def dashboard_keyboard() -> ReplyKeyboardMarkup:
+    """Формирует клавиатуру главной панели с кнопкой запуска смены."""
 
     builder = ReplyKeyboardBuilder()
     builder.button(text=START_SHIFT_BUTTON)
-    if include_guide:
-        builder.button(text=GUIDE_BUTTON)
-    builder.adjust(1, 1)
+    builder.adjust(1)
     return builder.as_markup(resize_keyboard=True)
 
 

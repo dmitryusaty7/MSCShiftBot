@@ -4,7 +4,6 @@ from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
 
 from bot.keyboards.dashboard import (
     FINISH_SHIFT_BUTTON,
-    GUIDE_BUTTON,
     SHIFT_BACK_BUTTON,
     START_SHIFT_BUTTON,
     dashboard_keyboard,
@@ -18,23 +17,13 @@ def _flatten_texts(markup: ReplyKeyboardMarkup) -> list[str]:
     return [button.text for row in markup.keyboard for button in row if isinstance(button, KeyboardButton)]
 
 
-def test_dashboard_keyboard_contains_start_button() -> None:
-    """В клавиатуре главной панели всегда есть кнопка запуска смены."""
+def test_dashboard_keyboard_contains_only_start_button() -> None:
+    """Клавиатура главной панели содержит только кнопку запуска смены."""
 
     markup = dashboard_keyboard()
     assert isinstance(markup, ReplyKeyboardMarkup)
     texts = _flatten_texts(markup)
-    assert START_SHIFT_BUTTON in texts
-    assert GUIDE_BUTTON not in texts
-
-
-def test_dashboard_keyboard_with_guide() -> None:
-    """При запросе дополнительной кнопки в клавиатуре появляется «Руководство»"""
-
-    markup = dashboard_keyboard(include_guide=True)
-    texts = _flatten_texts(markup)
-    assert START_SHIFT_BUTTON in texts
-    assert GUIDE_BUTTON in texts
+    assert texts == [START_SHIFT_BUTTON]
 
 
 def test_shift_menu_keyboard_without_finish() -> None:

@@ -74,6 +74,9 @@ async def show_dashboard(
         f"Здравствуйте, {fio_text}{suffix}",
         "",
         f"Смен закрыто: {profile.closed_shifts}",
+        "",
+        "Чтобы начать новую смену, воспользуйтесь кнопкой ниже.",
+        "Если нужна справка, откройте раздел «Руководство» в закреплённых материалах бота.",
     ]
 
     await message.answer("\n".join(lines), reply_markup=dashboard_keyboard())
@@ -95,6 +98,8 @@ async def _open_shift(
     """Создаёт рабочую строку смены и отображает меню смены."""
 
     user_id = message.from_user.id
+
+    await flash_message(message, "Загружаю…", ttl=2.0)
 
     try:
         locked_today, existing_row = await asyncio.to_thread(
@@ -142,20 +147,36 @@ async def _open_shift(
     finally:
         release_user_lock(lock)
 
-    await render_shift_menu(
-        message,
-        user_id,
-        row_index,
-        service=service,
-        state=state,
-        show_loading=True,
-    )
+    try:
+        logger.info(
+            "Открываем меню смены (user_id=%s, row=%s)",
+            user_id,
+            row_index,
+        )
+        await render_shift_menu(
+            message,
+            user_id,
+            row_index,
+            service=service,
+            state=state,
+            delete_trigger_message=True,
+            show_loading=False,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Сбой при отображении меню смены (user_id=%s, row=%s)",
+            user_id,
+            row_index,
+            exc_info=True,
+        )
+        await message.answer(
+            "Не удалось открыть меню смены. Попробуйте снова или обратитесь к координатору."
+        )
 
 
 @router.message(F.text == START_SHIFT_BUTTON)
 async def handle_start_shift(message: types.Message, state: FSMContext) -> None:
     """Обработчик кнопки запуска оформления смены."""
 
-    await flash_message(message, "Загружаю…", ttl=2.0)
     service = _get_service()
     await _open_shift(message, state, service=service)
