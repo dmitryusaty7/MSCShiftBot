@@ -199,7 +199,7 @@ def _should_skip_middle(text: str | None) -> bool:
 async def _sync_workers_keyboard(message: types.Message, markup: types.ReplyKeyboardMarkup) -> None:
     """Обновляет reply-клавиатуру и удаляет вспомогательное сообщение."""
 
-    keyboard_message = await message.answer("\u200B", reply_markup=markup)
+    keyboard_message = await message.answer("👥 Рабочие — клавиатура", reply_markup=markup)
 
     async def _cleanup(msg: types.Message) -> None:
         await asyncio.sleep(0.2)
