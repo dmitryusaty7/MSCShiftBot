@@ -27,6 +27,7 @@ from bot.services import CrewSheetsService, CrewWorker
 from bot.utils.cleanup import cleanup_screen, send_screen_message
 from bot.utils.flash import flash_message, start_mode_flash
 from features.utils.messaging import safe_delete
+from .crew_norm import norm_text
 
 router = Router(name="crew")
 logger = logging.getLogger(__name__)
@@ -46,12 +47,6 @@ _service: CrewSheetsService | None = None
 # ---------------------------------------------------------------------------
 # Вспомогательные функции
 # ---------------------------------------------------------------------------
-
-
-def _norm(text: str | None) -> str:
-    """Нормализует текст кнопки Reply для сравнения."""
-
-    return " ".join((text or "").replace("\uFE0F", "").split()).lower()
 
 
 def _get_service() -> CrewSheetsService:
@@ -106,9 +101,9 @@ def _deserialize_workers(raw: Iterable[dict[str, Any]] | None) -> list[CrewWorke
 
 
 def _resolve_choice(mapping: dict[str, int], text: str | None) -> int | None:
-    target = _norm(text)
+    target = norm_text(text)
     for key, value in mapping.items():
-        if _norm(key) == target:
+        if norm_text(key) == target:
             return value
     return None
 
@@ -363,19 +358,21 @@ async def start_crew(message: types.Message, state: FSMContext, user_id: int) ->
         crew_screen_id=None,
     )
 
+    await state.set_state(CrewState.INTRO)
+
     await start_mode_flash(message, "crew")
     await _enter_intro(message, state)
 
 
-@router.message(F.text.func(lambda text: _norm(text) == _norm(MENU_BUTTON)))
-async def _crew_to_menu(message: types.Message, state: FSMContext) -> None:
+@router.message(F.text.func(lambda text: norm_text(text) == norm_text(MENU_BUTTON)))
+async def handle_intro_menu(message: types.Message, state: FSMContext) -> None:
     """Обрабатывает кнопку возврата в меню смены из любого шага."""
 
     await safe_delete(message)
     await _return_to_menu(message, state)
 
 
-@router.message(CrewState.INTRO, F.text.func(lambda text: _norm(text) == _norm(START_BUTTON)))
+@router.message(CrewState.INTRO, F.text.func(lambda text: norm_text(text) == norm_text(START_BUTTON)))
 async def handle_intro_start(message: types.Message, state: FSMContext) -> None:
     """Переходит от интро к шагу выбора водителя."""
 
@@ -389,18 +386,18 @@ async def handle_driver_step(message: types.Message, state: FSMContext) -> None:
 
     await safe_delete(message)
     text = message.text or ""
-    text_norm = _norm(text)
+    text_norm = norm_text(text)
 
-    if text_norm == _norm(MENU_BUTTON):
+    if text_norm == norm_text(MENU_BUTTON):
         return
-    if text_norm == _norm(BACK_BUTTON):
+    if text_norm == norm_text(BACK_BUTTON):
         await _enter_intro(message, state)
         return
-    if text_norm == _norm(ADD_DRIVER_BUTTON):
+    if text_norm == norm_text(ADD_DRIVER_BUTTON):
         await flash_message(message, "Добавление водителя пока недоступно.")
         await _enter_driver_step(message, state)
         return
-    if text_norm == _norm(NEXT_BUTTON):
+    if text_norm == norm_text(NEXT_BUTTON):
         data = await state.get_data()
         driver_id = data.get("crew_driver_id")
         if isinstance(driver_id, int):
@@ -431,19 +428,19 @@ async def handle_workers_step(message: types.Message, state: FSMContext) -> None
 
     await safe_delete(message)
     text = message.text or ""
-    text_norm = _norm(text)
+    text_norm = norm_text(text)
 
-    if text_norm == _norm(MENU_BUTTON):
+    if text_norm == norm_text(MENU_BUTTON):
         return
-    if text_norm == _norm(BACK_BUTTON):
+    if text_norm == norm_text(BACK_BUTTON):
         await _enter_driver_step(message, state)
         return
-    if text_norm == _norm(CLEAR_WORKERS_BUTTON):
+    if text_norm == norm_text(CLEAR_WORKERS_BUTTON):
         await state.update_data(crew_selected_worker_ids=[])
         await flash_message(message, "Список рабочих очищен.")
         await _enter_workers_step(message, state)
         return
-    if text_norm == _norm(CONFIRM_BUTTON):
+    if text_norm == norm_text(CONFIRM_BUTTON):
         data = await state.get_data()
         selected_ids = _selected_ids(data)
         if not selected_ids:

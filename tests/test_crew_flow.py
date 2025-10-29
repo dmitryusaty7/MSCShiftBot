@@ -12,6 +12,7 @@ from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
 
 from bot.handlers import crew, shift_menu
 from bot.handlers.crew import CrewState
+from bot.handlers.crew_norm import norm_text
 from bot.keyboards.crew_reply import (
     CONFIRM_BUTTON,
     MENU_BUTTON,
@@ -38,6 +39,12 @@ def test_intro_keyboard_contains_start_and_menu() -> None:
     markup = make_intro_kb()
     texts = _flatten(markup)
     assert texts == [START_BUTTON, MENU_BUTTON]
+
+
+def test_norm_text_handles_variations() -> None:
+    variant = "\u2009▶️\uFE0F  Начать   заполнение"
+    assert norm_text(variant) == norm_text(START_BUTTON)
+    assert norm_text(" " + START_BUTTON + " ") == norm_text(START_BUTTON)
 
 
 def test_driver_keyboard_returns_mapping() -> None:
@@ -294,3 +301,59 @@ def test_full_reply_flow(monkeypatch) -> None:
     assert saved["driver"] == "Иванов И."
     assert saved["workers"] == ["Рабочий Б"]
     assert any("Меню смены" in (msg.text or "") for msg in bot.sent_messages)
+
+
+async def _run_menu_from_intro(monkeypatch) -> bool:
+    chat_id = 20
+    user_id = 77
+    reset_history(chat_id)
+
+    service = StubCrewService(
+        row=3,
+        drivers=[CrewWorker(worker_id=1, name="Иванов И.")],
+        workers=[CrewWorker(worker_id=1, name="Рабочий А")],
+    )
+
+    original_service = crew._service
+    crew._service = service
+
+    bot = StubBot()
+    state = StubFSMContext()
+    called = False
+
+    async def fake_render_menu(message, user_id, row, **kwargs):  # noqa: ANN001
+        nonlocal called
+        called = True
+        await message.answer("Меню смены")
+
+    monkeypatch.setattr(shift_menu, "render_shift_menu", fake_render_menu)
+
+    try:
+        start_message = DummyMessage(
+            bot=bot,
+            chat_id=chat_id,
+            user_id=user_id,
+            message_id=bot.allocate_id(),
+            text="/crew",
+        )
+
+        await crew.start_crew(start_message, state, user_id=user_id)
+
+        menu_message = DummyMessage(
+            bot=bot,
+            chat_id=chat_id,
+            user_id=user_id,
+            message_id=bot.allocate_id(),
+            text=MENU_BUTTON,
+        )
+
+        await crew.handle_intro_menu(menu_message, state)
+
+        return called
+    finally:
+        crew._service = original_service
+
+
+def test_menu_button_returns_to_shift_menu(monkeypatch) -> None:
+    called = asyncio.run(_run_menu_from_intro(monkeypatch))
+    assert called
