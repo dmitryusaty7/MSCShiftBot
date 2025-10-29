@@ -35,12 +35,9 @@ def make_workers_inline_summary(
 
     if selected:
         lines.extend(f"• {worker.name}" for worker in selected)
+        lines.extend(["", "✖️ — удалить рабочего из списка"])
     else:
-        lines.append("• —")
-
-    lines.extend(["", "✖️ — удалить рабочего из списка"])
-
-    if not selected:
+        lines.append("рабочие пока не выбраны")
         return "\n".join(lines), None
 
     builder = InlineKeyboardBuilder()

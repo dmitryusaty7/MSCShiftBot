@@ -346,9 +346,10 @@ async def _run_flow(monkeypatch) -> tuple[StubCrewService, StubBot]:
         assert data.get("crew_selected_worker_ids") == [2]
         assert data.get("crew_selected_worker_names") == ["Рабочий Б"]
 
-        summary_id = data.get("crew_list_msg_id")
-        assert isinstance(summary_id, int)
-        summary_message = bot._storage[(chat_id, summary_id)]
+        screen_id = data.get("crew_screen_id")
+        assert isinstance(screen_id, int)
+        summary_message = bot._storage[(chat_id, screen_id)]
+        assert "Рабочий Б" in summary_message.text
 
         callback_remove = DummyCallback(summary_message, f"{WORKER_TOGGLE_PREFIX}2")
         await crew.handle_workers_inline(callback_remove, state)
