@@ -10,7 +10,7 @@ from aiogram.exceptions import TelegramBadRequest
 
 
 async def flash_message(
-    message: types.Message,
+    target: types.Message | types.CallbackQuery,
     text: str,
     *,
     ttl: float = 2.0,
@@ -19,6 +19,15 @@ async def flash_message(
 ) -> types.Message:
     """Отправляет временное сообщение и удаляет его по истечении TTL."""
 
+    bounded_ttl = max(0.1, min(ttl, 5.0))
+
+    if isinstance(target, types.CallbackQuery):
+        message = target.message
+        if message is None:
+            raise RuntimeError("Невозможно отправить flash: отсутствует message у callback.")
+    else:
+        message = target
+
     flash = await message.answer(
         text,
         reply_markup=reply_markup,
@@ -26,7 +35,7 @@ async def flash_message(
     )
 
     async def _cleanup(target: types.Message) -> None:
-        await asyncio.sleep(ttl)
+        await asyncio.sleep(bounded_ttl)
         try:
             await target.delete()
         except TelegramBadRequest:
