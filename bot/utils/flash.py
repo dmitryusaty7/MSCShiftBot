@@ -1,4 +1,4 @@
-"""Утилита для временных flash-сообщений с автоматическим удалением."""
+"""Утилиты для временных flash-сообщений с автоматическим удалением."""
 
 from __future__ import annotations
 
@@ -43,3 +43,22 @@ async def flash_message(
 
     asyncio.create_task(_cleanup(flash))
     return flash
+
+
+_MODE_HINTS = {
+    "crew": "Открываю раздел «Бригада»…",
+    "materials": "Открываю раздел «Материалы»…",
+    "expenses": "Открываю раздел «Расходы»…",
+}
+
+
+async def start_mode_flash(
+    target: types.Message | types.CallbackQuery,
+    mode: str,
+    *,
+    ttl: float = 1.5,
+) -> types.Message:
+    """Отправляет стандартизированное flash-сообщение о запуске раздела."""
+
+    hint = _MODE_HINTS.get(mode.lower(), f"Открываю раздел «{mode.title()}»…")
+    return await flash_message(target, hint, ttl=ttl)

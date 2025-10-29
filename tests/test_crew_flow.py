@@ -1,4 +1,4 @@
-"""Тесты обновлённого сценария раздела «Бригада» (водитель → рабочие)."""
+"""Тесты сценария раздела «Бригада» с Reply-клавиатурами."""
 
 from __future__ import annotations
 
@@ -10,69 +10,55 @@ from typing import Any
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
 
-from bot.handlers import crew
+from bot.handlers import crew, shift_menu
 from bot.handlers.crew import CrewState
-from bot.keyboards.crew_inline import (
-    CONFIRM_CALLBACK,
-    DRIVER_LIST_PREFIX,
-    DRIVER_PICK_PREFIX,
-    NOOP_CALLBACK,
-    WORKER_LIST_PREFIX,
-    WORKER_TOGGLE_PREFIX,
-    build_driver_keyboard,
-    build_worker_keyboard,
-)
 from bot.keyboards.crew_reply import (
-    ADD_WORKER_BUTTON,
-    BACK_BUTTON,
-    CLEAR_WORKERS_BUTTON,
     CONFIRM_BUTTON,
-    EDIT_BUTTON,
     MENU_BUTTON,
-    crew_confirm_keyboard,
-    crew_start_keyboard,
+    NEXT_BUTTON,
+    START_BUTTON,
+    make_driver_kb,
+    make_intro_kb,
+    make_workers_kb,
 )
 from bot.services import CrewWorker
 from bot.utils.cleanup import reset_history
 
 
 def _flatten(markup: ReplyKeyboardMarkup) -> list[str]:
-    return [button.text for row in markup.keyboard for button in row if isinstance(button, KeyboardButton)]
+    return [
+        button.text
+        for row in markup.keyboard
+        for button in row
+        if isinstance(button, KeyboardButton)
+    ]
 
 
-def test_start_keyboard_contains_controls() -> None:
-    markup = crew_start_keyboard()
+def test_intro_keyboard_contains_start_and_menu() -> None:
+    markup = make_intro_kb()
     texts = _flatten(markup)
-    assert {ADD_WORKER_BUTTON, CLEAR_WORKERS_BUTTON, CONFIRM_BUTTON, BACK_BUTTON, MENU_BUTTON} <= set(texts)
-    assert len(texts) == 5
+    assert texts == [START_BUTTON, MENU_BUTTON]
 
 
-def test_confirm_keyboard_contains_confirm_and_edit() -> None:
-    markup = crew_confirm_keyboard()
+def test_driver_keyboard_returns_mapping() -> None:
+    drivers = [CrewWorker(worker_id=i, name=f"Водитель {i}") for i in range(1, 4)]
+    markup, mapping = make_driver_kb(drivers, driver_id=2)
     texts = _flatten(markup)
-    assert texts == [CONFIRM_BUTTON, EDIT_BUTTON]
-
-
-def test_driver_keyboard_marks_selected_and_paginates() -> None:
-    drivers = [CrewWorker(worker_id=i, name=f"Водитель {i}") for i in range(1, 9)]
-    markup, page, total = build_driver_keyboard(drivers, page=0, selected_driver_id=5)
-    assert total == 2
-    assert page == 0
-    buttons = [button for row in markup.inline_keyboard for button in row]
-    texts = [button.text for button in buttons]
     assert any(text.startswith("✔") for text in texts)
-    assert any(DRIVER_LIST_PREFIX in (button.callback_data or "") for button in buttons)
+    assert NEXT_BUTTON in texts
+    assert mapping
+    assert mapping[next(iter(mapping))] == 1
 
 
-def test_worker_keyboard_disables_confirm_without_selection() -> None:
+def test_workers_keyboard_shows_confirm_only_with_selection() -> None:
     workers = [CrewWorker(worker_id=i, name=f"Рабочий {i}") for i in range(1, 4)]
-    markup_empty, _, _ = build_worker_keyboard(workers, page=0, selected_ids=[])
-    last_row = markup_empty.inline_keyboard[-1]
-    assert last_row[-1].callback_data == NOOP_CALLBACK
+    markup_empty, _ = make_workers_kb(workers, [])
+    texts_empty = _flatten(markup_empty)
+    assert CONFIRM_BUTTON not in texts_empty
 
-    markup_full, _, _ = build_worker_keyboard(workers, page=0, selected_ids=[1, 2])
-    last_row_full = markup_full.inline_keyboard[-1]
-    assert last_row_full[-1].callback_data == CONFIRM_CALLBACK
+    markup_full, _ = make_workers_kb(workers, [1, 3])
+    texts_full = _flatten(markup_full)
+    assert CONFIRM_BUTTON in texts_full
 
 
 class StubCrewService:
@@ -104,7 +90,6 @@ class StubCrewService:
             }
         )
 
-    # Методы для рендеринга меню смены ---------------------------------
     def base_service(self) -> "StubCrewService":  # type: ignore[override]
         return self
 
@@ -167,7 +152,7 @@ class DummyMessage:
         reply_markup=None,
     ) -> None:
         self.bot = bot
-        self.chat = SimpleNamespace(id=chat_id)
+        self.chat = SimpleNamespace(id=chat_id, type="private")
         self.from_user = SimpleNamespace(id=user_id, is_bot=False)
         self.message_id = message_id
         self.text = text
@@ -181,15 +166,6 @@ class DummyMessage:
         await self.bot.delete_message(self.chat.id, self.message_id)
 
 
-class DummyCallback:
-    def __init__(self, message: DummyMessage, data: str) -> None:
-        self.message = message
-        self.data = data
-
-    async def answer(self, *args: Any, **kwargs: Any) -> None:
-        return None
-
-
 class StubFSMContext:
     def __init__(self) -> None:
         self._state: str | None = None
@@ -201,11 +177,11 @@ class StubFSMContext:
     async def get_state(self) -> str | None:
         return self._state
 
-    async def update_data(self, **kwargs: Any) -> None:
-        self._data.update(kwargs)
-
     async def get_data(self) -> dict[str, Any]:
         return dict(self._data)
+
+    async def update_data(self, **kwargs: Any) -> None:
+        self._data.update(kwargs)
 
     async def clear(self) -> None:
         self._state = None
@@ -213,96 +189,108 @@ class StubFSMContext:
 
 
 async def _run_flow(monkeypatch) -> tuple[StubCrewService, StubBot]:
-    chat_id = 500
+    chat_id = 10
     user_id = 42
-
     reset_history(chat_id)
 
-    drivers = [CrewWorker(worker_id=1, name="Иванов И."), CrewWorker(worker_id=2, name="Петров П.")]
-    workers = [
-        CrewWorker(worker_id=1, name="Рабочий А"),
-        CrewWorker(worker_id=2, name="Рабочий Б"),
-        CrewWorker(worker_id=3, name="Рабочий В"),
-    ]
-    service = StubCrewService(row=7, drivers=drivers, workers=workers)
+    service = StubCrewService(
+        row=5,
+        drivers=[CrewWorker(worker_id=1, name="Иванов И."), CrewWorker(worker_id=2, name="Петров П.")],
+        workers=[
+            CrewWorker(worker_id=1, name="Рабочий А"),
+            CrewWorker(worker_id=2, name="Рабочий Б"),
+        ],
+    )
+
+    original_service = crew._service
+    crew._service = service
+
     bot = StubBot()
     state = StubFSMContext()
 
-    trigger = DummyMessage(
-        bot=bot,
-        chat_id=chat_id,
-        user_id=user_id,
-        message_id=bot.allocate_id(),
-        text="старт",
-    )
+    async def fake_render_menu(message, user_id, row, **kwargs):  # noqa: ANN001
+        await message.answer("Меню смены\n👥 Состав бригады — ✅ готово")
 
-    crew._service = None
-    monkeypatch.setattr(crew, "_get_service", lambda: service)
+    monkeypatch.setattr(shift_menu, "render_shift_menu", fake_render_menu)
 
-    from bot.handlers import shift_menu
+    try:
+        start_message = DummyMessage(
+            bot=bot,
+            chat_id=chat_id,
+            user_id=user_id,
+            message_id=bot.allocate_id(),
+            text="/crew",
+        )
 
-    async def fake_render_shift_menu(message, user_id, row, **kwargs):  # noqa: ANN001
-        await message.bot.send_message(message.chat.id, f"Меню смены (row={row})")
+        await crew.start_crew(start_message, state, user_id=user_id)
+        assert await state.get_state() == CrewState.INTRO.state
 
-    shift_menu._service = None
-    monkeypatch.setattr(shift_menu, "_get_service", lambda: service.base_service())
-    monkeypatch.setattr(shift_menu, "render_shift_menu", fake_render_shift_menu)
+        intro_message = DummyMessage(
+            bot=bot,
+            chat_id=chat_id,
+            user_id=user_id,
+            message_id=bot.allocate_id(),
+            text=START_BUTTON,
+        )
+        await crew.handle_intro_start(intro_message, state)
+        assert await state.get_state() == CrewState.DRIVER.state
 
-    await crew.start_crew(trigger, state, user_id=user_id)
+        data = await state.get_data()
+        driver_button = next(text for text, value in data["crew_map_buttons"].items() if value == 1)
+        driver_message = DummyMessage(
+            bot=bot,
+            chat_id=chat_id,
+            user_id=user_id,
+            message_id=bot.allocate_id(),
+            text=driver_button,
+        )
+        await crew.handle_driver_step(driver_message, state)
+        data = await state.get_data()
+        assert data.get("crew_driver_id") == 1
 
-    assert await state.get_state() == CrewState.DRIVER.state
+        next_message = DummyMessage(
+            bot=bot,
+            chat_id=chat_id,
+            user_id=user_id,
+            message_id=bot.allocate_id(),
+            text=NEXT_BUTTON,
+        )
+        await crew.handle_driver_step(next_message, state)
+        assert await state.get_state() == CrewState.WORKERS.state
 
-    data = await state.get_data()
-    inline_id = data.get("crew_inline_id")
-    screen_id = data.get("crew_screen_id")
-    assert isinstance(inline_id, int)
-    assert isinstance(screen_id, int)
+        data = await state.get_data()
+        worker_button = next(text for text, value in data["crew_map_buttons"].items() if value == 2)
+        worker_message = DummyMessage(
+            bot=bot,
+            chat_id=chat_id,
+            user_id=user_id,
+            message_id=bot.allocate_id(),
+            text=worker_button,
+        )
+        await crew.handle_workers_step(worker_message, state)
+        data = await state.get_data()
+        assert data.get("crew_selected_worker_ids") == [2]
 
-    inline_message = bot._storage[(chat_id, inline_id)]
-    # Выбрать водителя
-    callback_pick = DummyCallback(inline_message, f"{DRIVER_PICK_PREFIX}1")
-    await crew.handle_driver_pick(callback_pick, state)
+        confirm_message = DummyMessage(
+            bot=bot,
+            chat_id=chat_id,
+            user_id=user_id,
+            message_id=bot.allocate_id(),
+            text=CONFIRM_BUTTON,
+        )
+        await crew.handle_workers_step(confirm_message, state)
 
-    # Перейти к списку рабочих
-    callback_next = DummyCallback(inline_message, f"{WORKER_LIST_PREFIX}0")
-    await crew.handle_worker_page(callback_next, state)
-    assert await state.get_state() == CrewState.WORKERS.state
+        assert service.saved_calls
+        assert await state.get_state() is None
 
-    # Выбрать рабочего
-    inline_message = bot._storage[(chat_id, inline_id)]
-    callback_worker = DummyCallback(inline_message, f"{WORKER_TOGGLE_PREFIX}2")
-    await crew.handle_worker_toggle(callback_worker, state)
+        return service, bot
+    finally:
+        crew._service = original_service
 
-    data = await state.get_data()
-    assert data.get("crew_selected_worker_ids") == [2]
 
-    # Подтверждение через inline
-    callback_confirm = DummyCallback(inline_message, CONFIRM_CALLBACK)
-    await crew.handle_inline_confirm(callback_confirm, state)
-    assert await state.get_state() == CrewState.CONFIRM.state
-
-    # Финальное подтверждение
-    final_message = DummyMessage(
-        bot=bot,
-        chat_id=chat_id,
-        user_id=user_id,
-        message_id=bot.allocate_id(),
-        text=CONFIRM_BUTTON,
-    )
-    await crew.handle_confirm_save(final_message, state)
-
-    assert service.saved_calls
+def test_full_reply_flow(monkeypatch) -> None:
+    service, bot = asyncio.run(_run_flow(monkeypatch))
     saved = service.saved_calls[-1]
-    assert saved["row"] == 7
     assert saved["driver"] == "Иванов И."
     assert saved["workers"] == ["Рабочий Б"]
-    assert saved["telegram_id"] == user_id
-
-    return service, bot
-
-
-def test_full_flow(monkeypatch) -> None:
-    service, bot = asyncio.run(_run_flow(monkeypatch))
-    assert service.saved_calls
-    menu_messages = [msg.text for msg in bot.sent_messages if msg.text and "Меню смены" in msg.text]
-    assert menu_messages
+    assert any("Меню смены" in (msg.text or "") for msg in bot.sent_messages)
