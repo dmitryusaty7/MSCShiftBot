@@ -6,6 +6,7 @@ import asyncio
 import logging
 
 from aiogram import F, Router, types
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 
@@ -49,7 +50,7 @@ async def show_dashboard(
     *,
     service: SheetsService | None = None,
     state: FSMContext | None = None,
-) -> None:
+) -> types.Message | None:
     """Отправляет главную панель с приветствием и статистикой по сменам."""
 
     sheets = service or _get_service()
@@ -62,8 +63,29 @@ async def show_dashboard(
         )
         return
 
+    bot = message.bot
+    chat_id = message.chat.id
+
     if state is not None:
+        data = await state.get_data()
+        dashboard_message_id = data.get("dashboard_message_id")
+        shift_menu_message_id = data.get("shift_menu_message_id")
+        if dashboard_message_id:
+            try:
+                await bot.delete_message(chat_id, dashboard_message_id)
+            except TelegramBadRequest:
+                pass
+        if shift_menu_message_id:
+            try:
+                await bot.delete_message(chat_id, shift_menu_message_id)
+            except TelegramBadRequest:
+                pass
+        await state.update_data(
+            dashboard_message_id=None,
+            shift_menu_message_id=None,
+        )
         await state.set_state(ShiftState.IDLE)
+
     reset_shift_session(user_id)
 
     fio_text = profile.fio.strip() or profile.fio_compact.strip() or str(user_id)
@@ -79,7 +101,14 @@ async def show_dashboard(
         "Если нужна справка, откройте раздел «Руководство» в закреплённых материалах бота.",
     ]
 
-    await message.answer("\n".join(lines), reply_markup=dashboard_keyboard())
+    dashboard_message = await message.answer(
+        "\n".join(lines), reply_markup=dashboard_keyboard()
+    )
+
+    if state is not None:
+        await state.update_data(dashboard_message_id=dashboard_message.message_id)
+
+    return dashboard_message
 
 
 @router.message(Command("menu"))
@@ -153,6 +182,15 @@ async def _open_shift(
             user_id,
             row_index,
         )
+        if state is not None:
+            data = await state.get_data()
+            dashboard_message_id = data.get("dashboard_message_id")
+            if dashboard_message_id:
+                try:
+                    await message.bot.delete_message(message.chat.id, dashboard_message_id)
+                except TelegramBadRequest:
+                    pass
+                await state.update_data(dashboard_message_id=None)
         await render_shift_menu(
             message,
             user_id,

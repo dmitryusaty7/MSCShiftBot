@@ -9,6 +9,7 @@ from datetime import date, datetime
 from typing import Any
 
 from aiogram import F, Router, types
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
@@ -339,6 +340,19 @@ async def render_shift_menu(
     if state is not None:
         await state.set_state(ShiftState.ACTIVE)
 
+    bot = message.bot
+    chat_id = message.chat.id
+
+    previous_menu_id = None
+    if state is not None:
+        data = await state.get_data()
+        previous_menu_id = data.get("shift_menu_message_id")
+        if previous_menu_id:
+            try:
+                await bot.delete_message(chat_id, previous_menu_id)
+            except TelegramBadRequest:
+                pass
+
     markup = shift_menu_keyboard(
         expenses_done=session.modes["expenses"],
         materials_done=session.modes["materials"],
@@ -346,7 +360,15 @@ async def render_shift_menu(
         show_finish=all(session.modes.values()) and not session.closed,
     )
 
-    await message.answer("\n".join(_menu_lines(session)), reply_markup=markup)
+    menu_message = await message.answer(
+        "\n".join(_menu_lines(session)), reply_markup=markup
+    )
+
+    if state is not None:
+        await state.update_data(
+            shift_menu_message_id=menu_message.message_id,
+            dashboard_message_id=None,
+        )
 
 
 async def _prepare_mode(

@@ -65,6 +65,12 @@ async def _clear_data_message(
     await state.update_data(**{key: None})
 
 
+async def _clear_duplicate_alert(state: FSMContext, *, bot: Bot, chat_id: int) -> None:
+    """Удаляет сообщение о конфликте ФИО, если оно есть."""
+
+    await _clear_data_message(state, "duplicate_id", bot=bot, chat_id=chat_id)
+
+
 def _get_service() -> SheetsService:
     """Возвращает экземпляр сервиса работы с таблицами."""
 
@@ -140,6 +146,7 @@ async def _handle_text_step(
     await _clear_user_inputs(state, bot=bot, chat_id=chat_id)
     await _clear_data_message(state, "prompt_id", bot=bot, chat_id=chat_id)
     await _clear_data_message(state, "error_id", bot=bot, chat_id=chat_id)
+    await _clear_duplicate_alert(state, bot=bot, chat_id=chat_id)
     await state.set_state(next_state)
     await _store_prompt(message, state, validator_message, reply_markup=reply_markup)
 
@@ -153,6 +160,7 @@ async def _show_confirmation(message: types.Message, state: FSMContext) -> None:
     await _clear_data_message(state, "prompt_id", bot=bot, chat_id=chat_id)
     await _clear_data_message(state, "error_id", bot=bot, chat_id=chat_id)
     await _clear_data_message(state, "confirm_id", bot=bot, chat_id=chat_id)
+    await _clear_duplicate_alert(state, bot=bot, chat_id=chat_id)
     await _clear_user_inputs(state, bot=bot, chat_id=chat_id)
 
     fio = " ".join(
@@ -222,10 +230,14 @@ async def handle_start(message: types.Message, state: FSMContext) -> None:
             return
 
     if profile:
-        await message.answer("Добро пожаловать! Вы уже зарегистрированы. Открываю панель.")
+        reg03 = await message.answer(
+            "Добро пожаловать! Вы уже зарегистрированы. Открываю панель."
+        )
         await show_menu(message, service=service, state=state)
+        await _safe_delete_message(message.bot, message.chat.id, reg03.message_id)
         return
 
+    await _clear_duplicate_alert(state, bot=message.bot, chat_id=message.chat.id)
     await state.clear()
     await state.set_state(RegistrationState.start)
     await _store_prompt(
@@ -245,8 +257,16 @@ async def start_registration(message: types.Message, state: FSMContext) -> None:
     chat_id = message.chat.id
     await _clear_user_inputs(state, bot=bot, chat_id=chat_id)
     await _clear_data_message(state, "prompt_id", bot=bot, chat_id=chat_id)
+    await _clear_duplicate_alert(state, bot=bot, chat_id=chat_id)
     await state.set_state(RegistrationState.last_name)
-    await state.update_data(last_name="", first_name="", patronymic="", prompt_id=None, error_id=None)
+    await state.update_data(
+        last_name="",
+        first_name="",
+        patronymic="",
+        prompt_id=None,
+        error_id=None,
+        duplicate_id=None,
+    )
     await _store_prompt(
         message,
         state,
@@ -270,6 +290,7 @@ async def cancel_registration(message: types.Message, state: FSMContext) -> None
     await _clear_data_message(state, "prompt_id", bot=bot, chat_id=chat_id)
     await _clear_data_message(state, "error_id", bot=bot, chat_id=chat_id)
     await _clear_data_message(state, "confirm_id", bot=bot, chat_id=chat_id)
+    await _clear_duplicate_alert(state, bot=bot, chat_id=chat_id)
     await state.clear()
     await message.answer(
         "Регистрация отменена. Для повторного запуска используйте команду /start.",
@@ -330,6 +351,7 @@ async def process_patronymic(message: types.Message, state: FSMContext) -> None:
 
     await state.update_data(patronymic=value)
     await _clear_user_inputs(state, bot=bot, chat_id=chat_id)
+    await _clear_duplicate_alert(state, bot=bot, chat_id=chat_id)
     await _show_confirmation(message, state)
 
 
@@ -342,6 +364,7 @@ async def retry_registration(message: types.Message, state: FSMContext) -> None:
     await _register_user_input(state, message.message_id)
     await _clear_user_inputs(state, bot=bot, chat_id=chat_id)
     await _clear_data_message(state, "confirm_id", bot=bot, chat_id=chat_id)
+    await _clear_duplicate_alert(state, bot=bot, chat_id=chat_id)
     await state.set_state(RegistrationState.last_name)
     await state.update_data(
         prompt_id=None,
@@ -389,9 +412,11 @@ async def confirm_registration(message: types.Message, state: FSMContext) -> Non
         service.fio_duplicate_exists, spreadsheet_id, last_name, first_name, patronymic
     )
     if duplicate_exists:
-        await message.answer(
+        await _clear_duplicate_alert(state, bot=bot, chat_id=chat_id)
+        duplicate_message = await message.answer(
             "Пользователь с таким ФИО уже зарегистрирован. Уточните данные или обратитесь к координатору."
         )
+        await state.update_data(duplicate_id=duplicate_message.message_id)
         return
 
     user_id = message.from_user.id
@@ -411,6 +436,7 @@ async def confirm_registration(message: types.Message, state: FSMContext) -> Non
         await message.answer("Временная ошибка при сохранении. Попробуйте позже.")
         return
 
+    await _clear_duplicate_alert(state, bot=bot, chat_id=chat_id)
     await state.clear()
     await message.answer(
         "Регистрация завершена. Статус: Активен. Открываю панель.",
