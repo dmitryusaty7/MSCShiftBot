@@ -28,6 +28,7 @@ from bot.keyboards.crew_reply import (
     make_confirmation_kb,
     make_driver_kb,
     make_intro_kb,
+    make_middle_prompt_kb,
     make_workers_kb,
 )
 from bot.services import (
@@ -39,6 +40,7 @@ from bot.services import (
 from bot.utils.cleanup import remember_message, send_screen_message
 from bot.utils.flash import flash_message
 from bot.utils.textnorm import norm_text
+from features.utils.messaging import safe_delete
 
 router = Router(name="crew")
 logger = logging.getLogger(__name__)
@@ -137,6 +139,16 @@ def _deserialize_workers(raw: Iterable[dict[str, Any]] | None) -> list[CrewWorke
     return workers
 
 
+def _find_worker_by_name(workers: Sequence[CrewWorker], name: str) -> CrewWorker | None:
+    """Возвращает сотрудника по имени с учётом нормализации."""
+
+    target = _norm(name)
+    for worker in workers:
+        if _norm(worker.name) == target:
+            return worker
+    return None
+
+
 def _resolve_choice(mapping: dict[str, int], text: str | None) -> int | None:
     target = _norm(text)
     for key, value in mapping.items():
@@ -152,21 +164,6 @@ def _driver_step_text(driver: CrewWorker | None) -> str:
         "выберите водителя из списка\n"
         f"текущий выбор: {current}"
     )
-
-
-def _workers_step_text(driver: CrewWorker | None, selected: Sequence[CrewWorker]) -> str:
-    driver_name = driver.name if driver else "—"
-    lines = [
-        "🧑‍🔧 Рабочие",
-        f"водитель: {driver_name}",
-        f"выбрано: {len(selected)}",
-        "",
-        "тап по имени — добавляет/удаляет из списка",
-    ]
-    if selected:
-        lines.extend(["", "выбранные:"])
-        lines.extend(f"• {worker.name}" for worker in selected)
-    return "\n".join(lines)
 
 
 def _summary_text(driver: CrewWorker, workers: Sequence[CrewWorker]) -> str:
@@ -196,7 +193,48 @@ def _selected_ids(data: dict[str, Any]) -> list[int]:
 
 def _should_skip_middle(text: str | None) -> bool:
     normalized = _norm(text)
-    return normalized in {"", "-", "—", "нет"}
+    return normalized in {"", "-", "—", "нет", "пропустить"}
+
+
+WORKERS_KEYBOARD_PLACEHOLDER = "👥 Рабочие — клавиатура"
+
+
+async def _remove_workers_keyboard(message: types.Message, state: FSMContext) -> None:
+    """Удаляет вспомогательное сообщение с Reply-клавиатурой рабочих."""
+
+    data = await state.get_data()
+    keyboard_message_id = data.get("crew_workers_keyboard_message_id")
+    if not isinstance(keyboard_message_id, int):
+        return
+
+    try:
+        await message.bot.delete_message(message.chat.id, keyboard_message_id)
+    except TelegramBadRequest:
+        logger.debug(
+            "Не удалось удалить сообщение клавиатуры рабочих (id=%s)",
+            keyboard_message_id,
+            exc_info=False,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Ошибка при удалении сообщения клавиатуры рабочих (id=%s)",
+            keyboard_message_id,
+        )
+
+    await state.update_data(crew_workers_keyboard_message_id=None)
+
+
+async def _sync_workers_keyboard(
+    message: types.Message,
+    state: FSMContext,
+    markup: types.ReplyKeyboardMarkup,
+) -> None:
+    """Обновляет Reply-клавиатуру шага рабочих и сохраняет её сообщение."""
+
+    await _remove_workers_keyboard(message, state)
+    keyboard_message = await message.answer(WORKERS_KEYBOARD_PLACEHOLDER, reply_markup=markup)
+    remember_message(message.chat.id, keyboard_message.message_id)
+    await state.update_data(crew_workers_keyboard_message_id=keyboard_message.message_id)
 
 
 async def _refresh_driver_directory(state: FSMContext) -> list[CrewWorker]:
@@ -235,8 +273,8 @@ async def _ask_driver_middle(message: types.Message, state: FSMContext) -> None:
     await show_screen(
         message,
         state,
-        text="Введите отчество (если нет, оставьте пустым или отправьте «-»):",
-        reply_markup=types.ReplyKeyboardRemove(),
+        text="Введите отчество (если нет, нажмите «Пропустить»):",
+        reply_markup=make_middle_prompt_kb(),
     )
 
 
@@ -293,7 +331,7 @@ async def _finalize_driver_addition(message: types.Message, state: FSMContext) -
         return
 
     drivers = await _refresh_driver_directory(state)
-    driver = next((item for item in drivers if item.name == full_name), None)
+    driver = _find_worker_by_name(drivers, full_name)
     await state.update_data(
         crew_driver_id=driver.worker_id if isinstance(driver, CrewWorker) else None,
         crew_driver_name=driver.name if isinstance(driver, CrewWorker) else full_name,
@@ -325,12 +363,13 @@ async def _ask_worker_middle(message: types.Message, state: FSMContext) -> None:
     await show_screen(
         message,
         state,
-        text="Введите отчество (если нет, оставьте пустым или отправьте «-»):",
-        reply_markup=types.ReplyKeyboardRemove(),
+        text="Введите отчество (если нет, нажмите «Пропустить»):",
+        reply_markup=make_middle_prompt_kb(),
     )
 
 
 async def _start_add_worker(message: types.Message, state: FSMContext) -> None:
+    await _remove_workers_keyboard(message, state)
     await state.update_data(
         crew_add_worker_last=None,
         crew_add_worker_first=None,
@@ -384,7 +423,7 @@ async def _finalize_worker_addition(message: types.Message, state: FSMContext) -
 
     workers = await _refresh_worker_directory(state)
     selected_set = set(_selected_ids(data))
-    new_worker = next((item for item in workers if item.name == full_name), None)
+    new_worker = _find_worker_by_name(workers, full_name)
     if isinstance(new_worker, CrewWorker):
         selected_set.add(new_worker.worker_id)
 
@@ -398,42 +437,8 @@ async def _finalize_worker_addition(message: types.Message, state: FSMContext) -
     await _enter_workers_step(message, state)
 
 
-async def render_workers_inline_list(message: types.Message, state: FSMContext) -> None:
-    """Отрисовывает (или обновляет) inline-сводку выбранных рабочих."""
-
-    data = await state.get_data()
-    drivers = _deserialize_workers(data.get("crew_drivers"))
-    workers = _deserialize_workers(data.get("crew_workers"))
-
-    driver_id = data.get("crew_driver_id") if isinstance(data.get("crew_driver_id"), int) else None
-    selected_ids = set(_selected_ids(data))
-
-    driver = next((item for item in drivers if item.worker_id == driver_id), None)
-    selected_workers = [worker for worker in workers if worker.worker_id in selected_ids]
-
-    text, markup = make_workers_inline_summary(driver, selected_workers)
-
-    list_id = data.get("crew_list_msg_id")
-    if isinstance(list_id, int):
-        try:
-            await message.bot.edit_message_text(
-                text,
-                chat_id=message.chat.id,
-                message_id=list_id,
-                reply_markup=markup,
-            )
-            return
-        except TelegramBadRequest:
-            logger.debug("Не удалось обновить сообщение сводки, отправляю новое.")
-        except Exception:  # noqa: BLE001
-            logger.warning("Ошибка при обновлении сводки", exc_info=True)
-
-    summary = await message.answer(text, reply_markup=markup)
-    remember_message(message.chat.id, summary.message_id)
-    await state.update_data(crew_list_msg_id=summary.message_id)
-
-
 async def _enter_intro(message: types.Message, state: FSMContext) -> None:
+    await _remove_workers_keyboard(message, state)
     await state.update_data(
         crew_map_buttons={},
         crew_confirmation_pending=False,
@@ -451,6 +456,7 @@ async def _enter_intro(message: types.Message, state: FSMContext) -> None:
 
 
 async def _enter_driver_step(message: types.Message, state: FSMContext) -> None:
+    await _remove_workers_keyboard(message, state)
     data = await state.get_data()
     drivers = _deserialize_workers(data.get("crew_drivers"))
     if not drivers:
@@ -501,22 +507,24 @@ async def _enter_workers_step(message: types.Message, state: FSMContext) -> None
     )
 
     markup, mapping = make_workers_kb(workers, selected_ids)
+    summary_text, inline_markup = make_workers_inline_summary(driver, selected_workers)
 
     await state.update_data(crew_map_buttons=mapping)
     await state.set_state(CrewState.WORKERS)
     await show_screen(
         message,
         state,
-        text=_workers_step_text(driver, selected_workers),
-        reply_markup=markup,
+        text=summary_text,
+        reply_markup=inline_markup,
     )
 
-    await render_workers_inline_list(message, state)
+    await _sync_workers_keyboard(message, state, markup)
 
 
 async def _show_confirmation(message: types.Message, state: FSMContext) -> None:
     """Показывает экран подтверждения перед сохранением."""
 
+    await _remove_workers_keyboard(message, state)
     data = await state.get_data()
     drivers = _deserialize_workers(data.get("crew_drivers"))
     workers = _deserialize_workers(data.get("crew_workers"))
@@ -545,6 +553,7 @@ async def _show_confirmation(message: types.Message, state: FSMContext) -> None:
 
 
 async def _save_and_finish(message: types.Message, state: FSMContext) -> None:
+    await _remove_workers_keyboard(message, state)
     data = await state.get_data()
     drivers = _deserialize_workers(data.get("crew_drivers"))
     workers = _deserialize_workers(data.get("crew_workers"))
@@ -622,6 +631,7 @@ async def _prepare_references(state: FSMContext, user_id: int) -> tuple[int, lis
 
 
 async def _return_to_menu(message: types.Message, state: FSMContext) -> None:
+    await _remove_workers_keyboard(message, state)
     data = await state.get_data()
     user_id = data.get("crew_user_id")
     row = data.get("row")
@@ -745,6 +755,8 @@ async def handle_add_driver_last(message: types.Message, state: FSMContext) -> N
     text = message.text or ""
     text_norm = _norm(text)
 
+    await safe_delete(message)
+
     if text_norm == _norm(MENU_BUTTON):
         await _return_to_menu(message, state)
         return
@@ -768,6 +780,8 @@ async def handle_add_driver_last(message: types.Message, state: FSMContext) -> N
 async def handle_add_driver_first(message: types.Message, state: FSMContext) -> None:
     text = message.text or ""
     text_norm = _norm(text)
+
+    await safe_delete(message)
 
     if text_norm == _norm(MENU_BUTTON):
         await _return_to_menu(message, state)
@@ -793,6 +807,8 @@ async def handle_add_driver_first(message: types.Message, state: FSMContext) -> 
 async def handle_add_driver_middle(message: types.Message, state: FSMContext) -> None:
     text = message.text or ""
     text_norm = _norm(text)
+
+    await safe_delete(message)
 
     if text_norm == _norm(MENU_BUTTON):
         await _return_to_menu(message, state)
@@ -827,6 +843,7 @@ async def handle_workers_step(message: types.Message, state: FSMContext) -> None
     )
     text = message.text or ""
     text_norm = _norm(text)
+    await safe_delete(message)
 
     if text_norm == _norm(MENU_BUTTON):
         await state.update_data(crew_confirmation_pending=False)
@@ -847,6 +864,9 @@ async def handle_workers_step(message: types.Message, state: FSMContext) -> None
         )
         await flash_message(message, "Список рабочих очищен.")
         await _enter_workers_step(message, state)
+        return
+    if text_norm == _norm(CONFIRM_BUTTON):
+        await _save_and_finish(message, state)
         return
 
     data = await state.get_data()
@@ -884,6 +904,8 @@ async def handle_add_worker_last(message: types.Message, state: FSMContext) -> N
     text = message.text or ""
     text_norm = _norm(text)
 
+    await safe_delete(message)
+
     if text_norm == _norm(MENU_BUTTON):
         await _return_to_menu(message, state)
         return
@@ -907,6 +929,8 @@ async def handle_add_worker_last(message: types.Message, state: FSMContext) -> N
 async def handle_add_worker_first(message: types.Message, state: FSMContext) -> None:
     text = message.text or ""
     text_norm = _norm(text)
+
+    await safe_delete(message)
 
     if text_norm == _norm(MENU_BUTTON):
         await _return_to_menu(message, state)
@@ -932,6 +956,8 @@ async def handle_add_worker_first(message: types.Message, state: FSMContext) -> 
 async def handle_add_worker_middle(message: types.Message, state: FSMContext) -> None:
     text = message.text or ""
     text_norm = _norm(text)
+
+    await safe_delete(message)
 
     if text_norm == _norm(MENU_BUTTON):
         await _return_to_menu(message, state)
@@ -1038,5 +1064,4 @@ __all__ = [
     "enter_driver_step",
     "enter_workers_step",
     "ask_driver",
-    "render_workers_inline_list",
 ]

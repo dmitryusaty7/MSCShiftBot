@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Callable
 
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
@@ -76,7 +76,7 @@ def test_workers_keyboard_shows_confirm_only_with_selection() -> None:
 
     markup_full, _ = make_workers_kb(workers, [1, 3])
     texts_full = _flatten(markup_full)
-    assert CONFIRM_BUTTON not in texts_full
+    assert CONFIRM_BUTTON in texts_full
 
 
 def test_confirmation_keyboard_contains_expected_buttons() -> None:
@@ -99,7 +99,7 @@ def test_inline_summary_contains_toggle_buttons() -> None:
 
     buttons = [button for row in markup.inline_keyboard for button in row]
 
-    assert any(button.callback_data == WORKERS_CONFIRM_CALLBACK for button in buttons)
+    assert all(button.callback_data != WORKERS_CONFIRM_CALLBACK for button in buttons)
     toggle_buttons = [button for button in buttons if button.callback_data.startswith(WORKER_TOGGLE_PREFIX)]
     assert toggle_buttons
     assert any(button.text.startswith("✖") for button in toggle_buttons)
@@ -346,9 +346,10 @@ async def _run_flow(monkeypatch) -> tuple[StubCrewService, StubBot]:
         assert data.get("crew_selected_worker_ids") == [2]
         assert data.get("crew_selected_worker_names") == ["Рабочий Б"]
 
-        summary_id = data.get("crew_list_msg_id")
-        assert isinstance(summary_id, int)
-        summary_message = bot._storage[(chat_id, summary_id)]
+        screen_id = data.get("crew_screen_id")
+        assert isinstance(screen_id, int)
+        summary_message = bot._storage[(chat_id, screen_id)]
+        assert "Рабочий Б" in summary_message.text
 
         callback_remove = DummyCallback(summary_message, f"{WORKER_TOGGLE_PREFIX}2")
         await crew.handle_workers_inline(callback_remove, state)
@@ -361,14 +362,236 @@ async def _run_flow(monkeypatch) -> tuple[StubCrewService, StubBot]:
         data = await state.get_data()
         assert data.get("crew_selected_worker_ids") == [2]
 
-        updated_summary = bot._storage[(chat_id, summary_id)]
-        confirm_callback = DummyCallback(updated_summary, WORKERS_CONFIRM_CALLBACK)
-        await crew.handle_workers_confirm(confirm_callback, state)
+        confirm_message = DummyMessage(
+            bot=bot,
+            chat_id=chat_id,
+            user_id=user_id,
+            message_id=bot.allocate_id(),
+            text=CONFIRM_BUTTON,
+        )
+        await crew.handle_workers_step(confirm_message, state)
 
         assert service.saved_calls
         assert await state.get_state() is None
 
         return service, bot
+    finally:
+        crew._service = original_service
+        crew.flash_message = original_flash
+
+
+async def _run_add_driver_flow(
+    monkeypatch,
+    *,
+    transform: Callable[[str], str] | None = None,
+) -> tuple[StubCrewService, StubBot, dict[str, Any], str, int]:
+    chat_id = 30
+    user_id = 501
+    reset_history(chat_id)
+
+    service = StubCrewService(
+        row=7,
+        drivers=[CrewWorker(worker_id=1, name="Старый В.")],
+        workers=[CrewWorker(worker_id=1, name="Рабочий А")],
+    )
+
+    if transform is not None:
+        
+        def custom_add_driver(name: str) -> None:
+            service.drivers.append(
+                CrewWorker(worker_id=len(service.drivers) + 1, name=transform(name))
+            )
+
+        service.add_driver = custom_add_driver  # type: ignore[assignment]
+
+    original_service = crew._service
+    crew._service = service
+
+    async def fake_flash(target, text, ttl=2.0, **kwargs):  # noqa: ANN001
+        base = getattr(target, "message", target)
+        return await base.answer(text)
+
+    async def fake_render_menu(message, user_id, row, **kwargs):  # noqa: ANN001
+        await message.answer("Меню смены")
+
+    bot = StubBot()
+    state = StubFSMContext()
+
+    monkeypatch.setattr(shift_menu, "render_shift_menu", fake_render_menu)
+
+    original_flash = crew.flash_message
+    crew.flash_message = fake_flash
+
+    try:
+        start_message = DummyMessage(
+            bot=bot,
+            chat_id=chat_id,
+            user_id=user_id,
+            message_id=bot.allocate_id(),
+            text="/crew",
+        )
+        await crew.start_crew(start_message, state, user_id=user_id)
+
+        intro_message = DummyMessage(
+            bot=bot,
+            chat_id=chat_id,
+            user_id=user_id,
+            message_id=bot.allocate_id(),
+            text=START_BUTTON,
+        )
+        await crew.handle_intro_start(intro_message, state)
+
+        add_driver_message = DummyMessage(
+            bot=bot,
+            chat_id=chat_id,
+            user_id=user_id,
+            message_id=bot.allocate_id(),
+            text=ADD_DRIVER_BUTTON,
+        )
+        await crew.handle_driver_step(add_driver_message, state)
+
+        last_message = DummyMessage(
+            bot=bot,
+            chat_id=chat_id,
+            user_id=user_id,
+            message_id=bot.allocate_id(),
+            text="Новиков",
+        )
+        await crew.handle_add_driver_last(last_message, state)
+
+        first_message = DummyMessage(
+            bot=bot,
+            chat_id=chat_id,
+            user_id=user_id,
+            message_id=bot.allocate_id(),
+            text="Дмитрий",
+        )
+        await crew.handle_add_driver_first(first_message, state)
+
+        middle_message = DummyMessage(
+            bot=bot,
+            chat_id=chat_id,
+            user_id=user_id,
+            message_id=bot.allocate_id(),
+            text="Пропустить",
+        )
+        await crew.handle_add_driver_middle(middle_message, state)
+
+        return service, bot, await state.get_data(), await state.get_state(), chat_id
+    finally:
+        crew._service = original_service
+        crew.flash_message = original_flash
+
+
+async def _run_add_worker_flow(
+    monkeypatch,
+    *,
+    transform: Callable[[str], str] | None = None,
+) -> tuple[StubCrewService, StubBot, dict[str, Any], str, int]:
+    chat_id = 40
+    user_id = 802
+    reset_history(chat_id)
+
+    service = StubCrewService(
+        row=9,
+        drivers=[CrewWorker(worker_id=1, name="Старый В.")],
+        workers=[CrewWorker(worker_id=1, name="Рабочий А")],
+    )
+
+    if transform is not None:
+
+        def custom_add_worker(name: str) -> None:
+            service.workers.append(
+                CrewWorker(worker_id=len(service.workers) + 1, name=transform(name))
+            )
+
+        service.add_worker = custom_add_worker  # type: ignore[assignment]
+
+    original_service = crew._service
+    crew._service = service
+
+    async def fake_flash(target, text, ttl=2.0, **kwargs):  # noqa: ANN001
+        base = getattr(target, "message", target)
+        return await base.answer(text)
+
+    async def fake_render_menu(message, user_id, row, **kwargs):  # noqa: ANN001
+        await message.answer("Меню смены")
+
+    bot = StubBot()
+    state = StubFSMContext()
+
+    monkeypatch.setattr(shift_menu, "render_shift_menu", fake_render_menu)
+
+    original_flash = crew.flash_message
+    crew.flash_message = fake_flash
+
+    try:
+        start_message = DummyMessage(
+            bot=bot,
+            chat_id=chat_id,
+            user_id=user_id,
+            message_id=bot.allocate_id(),
+            text="/crew",
+        )
+        await crew.start_crew(start_message, state, user_id=user_id)
+
+        intro_message = DummyMessage(
+            bot=bot,
+            chat_id=chat_id,
+            user_id=user_id,
+            message_id=bot.allocate_id(),
+            text=START_BUTTON,
+        )
+        await crew.handle_intro_start(intro_message, state)
+
+        data = await state.get_data()
+        driver_button = next(text for text, value in data["crew_map_buttons"].items() if value == 1)
+        driver_message = DummyMessage(
+            bot=bot,
+            chat_id=chat_id,
+            user_id=user_id,
+            message_id=bot.allocate_id(),
+            text=driver_button,
+        )
+        await crew.handle_driver_step(driver_message, state)
+
+        add_worker_message = DummyMessage(
+            bot=bot,
+            chat_id=chat_id,
+            user_id=user_id,
+            message_id=bot.allocate_id(),
+            text=ADD_WORKER_BUTTON,
+        )
+        await crew.handle_workers_step(add_worker_message, state)
+
+        last_message = DummyMessage(
+            bot=bot,
+            chat_id=chat_id,
+            user_id=user_id,
+            message_id=bot.allocate_id(),
+            text="Гордеев",
+        )
+        await crew.handle_add_worker_last(last_message, state)
+
+        first_message = DummyMessage(
+            bot=bot,
+            chat_id=chat_id,
+            user_id=user_id,
+            message_id=bot.allocate_id(),
+            text="Иван",
+        )
+        await crew.handle_add_worker_first(first_message, state)
+
+        middle_message = DummyMessage(
+            bot=bot,
+            chat_id=chat_id,
+            user_id=user_id,
+            message_id=bot.allocate_id(),
+            text="Пропустить",
+        )
+        await crew.handle_add_worker_middle(middle_message, state)
+
+        return service, bot, await state.get_data(), await state.get_state(), chat_id
     finally:
         crew._service = original_service
         crew.flash_message = original_flash
@@ -380,6 +603,77 @@ def test_full_reply_flow(monkeypatch) -> None:
     assert saved["driver"] == "Иванов И."
     assert saved["workers"] == ["Рабочий Б"]
     assert any("Меню смены" in (msg.text or "") for msg in bot.sent_messages)
+
+
+def test_manual_driver_addition_moves_to_workers(monkeypatch) -> None:
+    service, bot, data, state_value, chat_id = asyncio.run(_run_add_driver_flow(monkeypatch))
+
+    assert state_value == CrewState.WORKERS.state
+    assert data.get("crew_driver_id") == len(service.drivers)
+
+    screen_id = data.get("crew_screen_id")
+    assert isinstance(screen_id, int)
+    summary_message = bot._storage[(chat_id, screen_id)]
+    assert "рабочие пока не выбраны" in summary_message.text
+
+
+def test_workers_keyboard_persists_after_driver_selection(monkeypatch) -> None:
+    service, bot, data, state_value, chat_id = asyncio.run(_run_add_driver_flow(monkeypatch))
+
+    assert state_value == CrewState.WORKERS.state
+
+    keyboard_messages = [
+        message
+        for message in bot.sent_messages
+        if isinstance(message.reply_markup, ReplyKeyboardMarkup)
+        and ADD_WORKER_BUTTON in _flatten(message.reply_markup)
+    ]
+
+    assert keyboard_messages, "Reply-клавиатура рабочих должна отображаться"
+
+    last_keyboard_message = keyboard_messages[-1]
+    assert last_keyboard_message.text == crew.WORKERS_KEYBOARD_PLACEHOLDER
+    assert (chat_id, last_keyboard_message.message_id) not in bot.deleted
+    assert data.get("crew_workers_keyboard_message_id") == last_keyboard_message.message_id
+
+
+def test_manual_driver_addition_handles_name_variants(monkeypatch) -> None:
+    def transform(name: str) -> str:
+        return f"  {name.lower()}  "
+
+    service, _, data, state_value, _ = asyncio.run(
+        _run_add_driver_flow(monkeypatch, transform=transform)
+    )
+
+    assert state_value == CrewState.WORKERS.state
+    assert data.get("crew_driver_id") == len(service.drivers)
+    assert data.get("crew_driver_name") == transform("Новиков Д.")
+
+
+def test_manual_worker_addition_updates_selection(monkeypatch) -> None:
+    service, bot, data, state_value, chat_id = asyncio.run(_run_add_worker_flow(monkeypatch))
+
+    assert state_value == CrewState.WORKERS.state
+    assert data.get("crew_selected_worker_ids") == [service.workers[-1].worker_id]
+    assert data.get("crew_selected_worker_names") == [service.workers[-1].name]
+
+    screen_id = data.get("crew_screen_id")
+    assert isinstance(screen_id, int)
+    summary_message = bot._storage[(chat_id, screen_id)]
+    assert service.workers[-1].name in summary_message.text
+
+
+def test_manual_worker_addition_handles_name_variants(monkeypatch) -> None:
+    def transform(name: str) -> str:
+        return name.lower()
+
+    service, _, data, state_value, _ = asyncio.run(
+        _run_add_worker_flow(monkeypatch, transform=transform)
+    )
+
+    assert state_value == CrewState.WORKERS.state
+    assert data.get("crew_selected_worker_ids") == [service.workers[-1].worker_id]
+    assert data.get("crew_selected_worker_names") == [service.workers[-1].name]
 
 
 async def _run_menu_from_intro(monkeypatch) -> bool:
