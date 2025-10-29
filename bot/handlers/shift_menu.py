@@ -179,12 +179,20 @@ def _menu_lines(session: ShiftSession) -> list[str]:
         _line("🧾 Расходы", session.modes["expenses"]),
         _line("📦 Материалы", session.modes["materials"]),
         _line("👥 Состав бригады", session.modes["crew"]),
-        "",
-        "Выберите раздел для заполнения. Кнопка «Закрыть смену» появится, когда все разделы будут отмечены как готовые.",
     ]
+    if not session.closed:
+        lines.extend(
+            [
+                "",
+                "Выберите раздел для заполнения. Кнопка «Завершить смену» появится, когда все разделы будут отмечены как готовые.",
+            ]
+        )
     if session.closed:
-        lines.append(
-            "Смена уже закрыта. Вернитесь в главную панель, чтобы открыть новую смену завтра."
+        lines.extend(
+            [
+                "",
+                "Смена уже закрыта. Вернитесь в главную панель, чтобы открыть новую смену завтра.",
+            ]
         )
     return lines
 
@@ -236,6 +244,7 @@ async def render_shift_menu(
 
     target_row = row
     lock = None
+    progress: dict[str, bool] | None = None
     try:
         if target_row is None:
             lock = await acquire_user_lock(user_id)
@@ -279,6 +288,33 @@ async def render_shift_menu(
         )
         shift_closed = False
 
+    mode_statuses: dict[str, str] = {}
+    try:
+        expenses_status, materials_status, crew_status = await asyncio.gather(
+            asyncio.to_thread(sheets.get_shift_mode_status, target_row, "expenses"),
+            asyncio.to_thread(sheets.get_shift_mode_status, target_row, "materials"),
+            asyncio.to_thread(sheets.get_shift_mode_status, target_row, "crew"),
+        )
+        mode_statuses = {
+            "expenses": expenses_status,
+            "materials": materials_status,
+            "crew": crew_status,
+        }
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Не удалось обновить статусы разделов (user_id=%s, row=%s)",
+            user_id,
+            target_row,
+        )
+
+    done_flags = {
+        key: bool(progress.get(key, False)) if progress else False
+        for key in MODE_KEYS.values()
+    }
+    if mode_statuses:
+        for key, status in mode_statuses.items():
+            done_flags[key] = status == "✅ готово"
+
     try:
         raw_date = await asyncio.to_thread(sheets.get_shift_date, target_row)
     except Exception:  # noqa: BLE001
@@ -290,7 +326,7 @@ async def render_shift_menu(
     session = _sync_session(
         user_id,
         row=target_row,
-        progress=progress,
+        progress=done_flags,
         shift_date=raw_date or date.today().isoformat(),
         closed=shift_closed,
     )
