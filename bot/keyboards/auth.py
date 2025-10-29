@@ -1,42 +1,51 @@
-"""Inline-клавиатуры для сценария регистрации."""
+"""Reply-клавиатуры для сценария регистрации."""
 
 from __future__ import annotations
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
 
-# Константы callback-данных для сценария регистрации
-START_PAYLOAD = "registration:start"
-SKIP_PAYLOAD = "registration:skip"
-CONFIRM_PAYLOAD = "registration:confirm"
-RETRY_PAYLOAD = "registration:retry"
+# Текстовые константы для reply-кнопок сценария регистрации
+START_BUTTON = "Начать регистрацию"
+SKIP_BUTTON = "Пропустить"
+CONFIRM_BUTTON = "Подтвердить"
+RETRY_BUTTON = "Ввести заново"
+CANCEL_BUTTON = "Отмена"
 
 
-def start_registration_kb() -> InlineKeyboardMarkup:
-    """Кнопка запуска сценария регистрации."""
+def start_registration_kb() -> ReplyKeyboardMarkup:
+    """Reply-клавиатура запуска регистрации с кнопками старта и отмены."""
 
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Начать регистрацию", callback_data=START_PAYLOAD)]
-        ]
+    return ReplyKeyboardMarkup(
+        resize_keyboard=True,
+        keyboard=[
+            [KeyboardButton(text=START_BUTTON)],
+            [KeyboardButton(text=CANCEL_BUTTON)],
+        ],
     )
 
 
-def skip_button_kb() -> InlineKeyboardMarkup:
-    """Клавиатура с возможностью пропустить ввод отчества."""
+def skip_button_kb() -> ReplyKeyboardMarkup:
+    """Reply-клавиатура шага отчества с кнопкой пропуска и отмены."""
 
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="Пропустить", callback_data=SKIP_PAYLOAD)]]
+    return ReplyKeyboardMarkup(
+        resize_keyboard=True,
+        keyboard=[
+            [KeyboardButton(text=SKIP_BUTTON)],
+            [KeyboardButton(text=CANCEL_BUTTON)],
+        ],
     )
 
 
-def confirm_retry_kb() -> InlineKeyboardMarkup:
-    """Клавиатура подтверждения данных или возврата к повторному вводу."""
+def confirm_retry_kb() -> ReplyKeyboardMarkup:
+    """Reply-клавиатура подтверждения данных с повторами и отменой."""
 
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+    return ReplyKeyboardMarkup(
+        resize_keyboard=True,
+        keyboard=[
             [
-                InlineKeyboardButton(text="Подтвердить", callback_data=CONFIRM_PAYLOAD),
-                InlineKeyboardButton(text="Ввести заново", callback_data=RETRY_PAYLOAD),
-            ]
-        ]
+                KeyboardButton(text=CONFIRM_BUTTON),
+                KeyboardButton(text=RETRY_BUTTON),
+            ],
+            [KeyboardButton(text=CANCEL_BUTTON)],
+        ],
     )

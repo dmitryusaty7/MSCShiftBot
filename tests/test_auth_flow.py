@@ -4,16 +4,18 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from aiogram import types
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bot.handlers import registration
 from bot.handlers.registration import RegistrationState
 from bot.keyboards.auth import (
-    CONFIRM_PAYLOAD,
-    RETRY_PAYLOAD,
-    SKIP_PAYLOAD,
-    START_PAYLOAD,
+    CANCEL_BUTTON,
+    CONFIRM_BUTTON,
+    RETRY_BUTTON,
+    SKIP_BUTTON,
+    START_BUTTON,
     confirm_retry_kb,
     skip_button_kb,
     start_registration_kb,
@@ -86,20 +88,6 @@ class DummyMessage:
 
     async def delete(self) -> None:
         await self.bot.delete_message(self.chat.id, self.message_id)
-
-
-class DummyCallbackQuery:
-    """Фиктивный callback-query для проверки inline-навигации."""
-
-    def __init__(self, *, bot: StubBot, message: DummyMessage, user_id: int, data: str) -> None:
-        self.bot = bot
-        self.message = message
-        self.from_user = SimpleNamespace(id=user_id)
-        self.data = data
-        self._answers: list[tuple[str | None, bool]] = []
-
-    async def answer(self, text: str | None = None, show_alert: bool = False) -> None:
-        self._answers.append((text, show_alert))
 
 
 class StubFSMContext:
@@ -221,14 +209,18 @@ def test_validate_name_failure():
 
 def test_keyboards_structure():
     start_kb = start_registration_kb()
-    assert start_kb.inline_keyboard[0][0].callback_data == START_PAYLOAD
+    assert start_kb.resize_keyboard
+    assert start_kb.keyboard[0][0].text == START_BUTTON
+    assert start_kb.keyboard[1][0].text == CANCEL_BUTTON
 
     skip_kb = skip_button_kb()
-    assert skip_kb.inline_keyboard[0][0].callback_data == SKIP_PAYLOAD
+    assert skip_kb.keyboard[0][0].text == SKIP_BUTTON
+    assert skip_kb.keyboard[1][0].text == CANCEL_BUTTON
 
     confirm_kb = confirm_retry_kb()
-    assert confirm_kb.inline_keyboard[0][0].callback_data == CONFIRM_PAYLOAD
-    assert confirm_kb.inline_keyboard[0][1].callback_data == RETRY_PAYLOAD
+    assert confirm_kb.keyboard[0][0].text == CONFIRM_BUTTON
+    assert confirm_kb.keyboard[0][1].text == RETRY_BUTTON
+    assert confirm_kb.keyboard[1][0].text == CANCEL_BUTTON
 
 
 async def _successful_registration_flow(stub_service: StubSheetsService) -> None:
@@ -243,16 +235,25 @@ async def _successful_registration_flow(stub_service: StubSheetsService) -> None
     start_message = bot.sent_messages[-1]
     assert start_message.text == "Чтобы начать регистрацию, нажмите кнопку ниже."
     assert any(msg.text == "🔍 Проверяю доступ…" for msg in bot.sent_messages)
-    assert (chat_id, 500) in bot.deleted
+    assert (chat_id, 500) not in bot.deleted
 
-    callback_start = DummyCallbackQuery(bot=bot, message=start_message, user_id=user_id, data=START_PAYLOAD)
-    await registration.start_registration(callback_start, state)
+    await registration.start_registration(
+        DummyMessage(
+            bot=bot,
+            user_id=user_id,
+            chat_id=chat_id,
+            message_id=501,
+            text=START_BUTTON,
+        ),
+        state,
+    )
     assert await state.get_state() == RegistrationState.last_name.state
     last_prompt = bot.sent_messages[-1]
     assert last_prompt.text == "Введите вашу Фамилию (только буквы)."
+    assert isinstance(last_prompt.reply_markup, types.ReplyKeyboardRemove)
 
     await registration.process_last_name(
-        DummyMessage(bot=bot, user_id=user_id, chat_id=chat_id, message_id=501, text="иванов"),
+        DummyMessage(bot=bot, user_id=user_id, chat_id=chat_id, message_id=502, text="иванов"),
         state,
     )
     assert await state.get_state() == RegistrationState.first_name.state
@@ -260,7 +261,7 @@ async def _successful_registration_flow(stub_service: StubSheetsService) -> None
     assert first_prompt.text == "Введите ваше Имя (только буквы)."
 
     await registration.process_first_name(
-        DummyMessage(bot=bot, user_id=user_id, chat_id=chat_id, message_id=502, text="иван"),
+        DummyMessage(bot=bot, user_id=user_id, chat_id=chat_id, message_id=503, text="иван"),
         state,
     )
     assert await state.get_state() == RegistrationState.patronymic.state
@@ -268,23 +269,29 @@ async def _successful_registration_flow(stub_service: StubSheetsService) -> None
     assert middle_prompt.text.startswith("Введите ваше Отчество")
 
     await registration.process_patronymic(
-        DummyMessage(bot=bot, user_id=user_id, chat_id=chat_id, message_id=503, text="иванович"),
+        DummyMessage(bot=bot, user_id=user_id, chat_id=chat_id, message_id=504, text="иванович"),
         state,
     )
     assert await state.get_state() == RegistrationState.confirm.state
     confirm_message = bot.sent_messages[-1]
     assert "<b>Иванов Иван Иванович</b>" in confirm_message.text
 
-    callback_confirm = DummyCallbackQuery(
-        bot=bot, message=confirm_message, user_id=user_id, data=CONFIRM_PAYLOAD
+    await registration.confirm_registration(
+        DummyMessage(
+            bot=bot,
+            user_id=user_id,
+            chat_id=chat_id,
+            message_id=505,
+            text=CONFIRM_BUTTON,
+        ),
+        state,
     )
-    await registration.confirm_registration(callback_confirm, state)
 
     assert stub_service.saved == [(user_id, "Иванов", "Иван", "Иванович")]
     assert any(msg.text == "Регистрация завершена. Статус: Активен. Открываю панель." for msg in bot.sent_messages)
     assert any(msg.text == "✅ Регистрация завершена" for msg in bot.sent_messages)
     assert await state.get_state() is None
-    assert bot.edited  # клавиатура подтверждения удалена
+    assert isinstance(bot.sent_messages[-2].reply_markup, types.ReplyKeyboardRemove)
     assert registration.show_menu.calls  # type: ignore[attr-defined]
     assert registration.flash_message.calls  # type: ignore[attr-defined]
 
@@ -301,7 +308,6 @@ async def _existing_user_shortcuts_to_menu(stub_service: StubSheetsService) -> N
     message = DummyMessage(bot=bot, user_id=77, chat_id=77, message_id=600, text="/start")
 
     await registration.handle_start(message, state)
-    assert (77, 600) in bot.deleted
     assert bot.sent_messages[0].text == "🔍 Проверяю доступ…"
     assert bot.sent_messages[1].text == "Добро пожаловать! Вы уже зарегистрированы. Открываю панель."
     assert registration.show_menu.calls  # type: ignore[attr-defined]
@@ -319,25 +325,26 @@ async def _invalid_last_name_shows_and_clears_error(stub_service: StubSheetsServ
     chat_id = 77
     start_msg = DummyMessage(bot=bot, user_id=user_id, chat_id=chat_id, message_id=700, text="/start")
     await registration.handle_start(start_msg, state)
-    callback_start = DummyCallbackQuery(
-        bot=bot, message=bot.sent_messages[-1], user_id=user_id, data=START_PAYLOAD
+    await registration.start_registration(
+        DummyMessage(bot=bot, user_id=user_id, chat_id=chat_id, message_id=701, text=START_BUTTON),
+        state,
     )
-    await registration.start_registration(callback_start, state)
 
     await registration.process_last_name(
-        DummyMessage(bot=bot, user_id=user_id, chat_id=chat_id, message_id=701, text="иванов1"),
+        DummyMessage(bot=bot, user_id=user_id, chat_id=chat_id, message_id=702, text="иванов1"),
         state,
     )
     error_message = bot.sent_messages[-1]
     assert error_message.text.startswith("Некорректная фамилия")
 
     await registration.process_last_name(
-        DummyMessage(bot=bot, user_id=user_id, chat_id=chat_id, message_id=702, text="иванов"),
+        DummyMessage(bot=bot, user_id=user_id, chat_id=chat_id, message_id=703, text="иванов"),
         state,
     )
     assert any(deleted_id == error_message.message_id for (_, deleted_id) in bot.deleted)
     assert (chat_id, 701) in bot.deleted
     assert (chat_id, 702) in bot.deleted
+    assert (chat_id, 703) in bot.deleted
     assert await state.get_state() == RegistrationState.first_name.state
 
 
@@ -355,20 +362,20 @@ async def _skip_patronymic_uses_button(stub_service: StubSheetsService) -> None:
         state,
     )
     await registration.start_registration(
-        DummyCallbackQuery(bot=bot, message=bot.sent_messages[-1], user_id=user_id, data=START_PAYLOAD),
+        DummyMessage(bot=bot, user_id=user_id, chat_id=chat_id, message_id=801, text=START_BUTTON),
         state,
     )
     await registration.process_last_name(
-        DummyMessage(bot=bot, user_id=user_id, chat_id=chat_id, message_id=801, text="иванов"),
+        DummyMessage(bot=bot, user_id=user_id, chat_id=chat_id, message_id=802, text="иванов"),
         state,
     )
     await registration.process_first_name(
-        DummyMessage(bot=bot, user_id=user_id, chat_id=chat_id, message_id=802, text="иван"),
+        DummyMessage(bot=bot, user_id=user_id, chat_id=chat_id, message_id=803, text="иван"),
         state,
     )
     prompt = bot.sent_messages[-1]
-    await registration.skip_patronymic(
-        DummyCallbackQuery(bot=bot, message=prompt, user_id=user_id, data=SKIP_PAYLOAD),
+    await registration.process_patronymic(
+        DummyMessage(bot=bot, user_id=user_id, chat_id=chat_id, message_id=804, text=SKIP_BUTTON),
         state,
     )
     confirm_message = bot.sent_messages[-1]

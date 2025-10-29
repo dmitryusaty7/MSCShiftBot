@@ -12,10 +12,11 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 from bot.keyboards.auth import (
-    CONFIRM_PAYLOAD,
-    RETRY_PAYLOAD,
-    SKIP_PAYLOAD,
-    START_PAYLOAD,
+    CANCEL_BUTTON,
+    CONFIRM_BUTTON,
+    RETRY_BUTTON,
+    SKIP_BUTTON,
+    START_BUTTON,
     confirm_retry_kb,
     skip_button_kb,
     start_registration_kb,
@@ -176,11 +177,6 @@ async def _show_confirmation(message: types.Message, state: FSMContext) -> None:
 async def handle_start(message: types.Message, state: FSMContext) -> None:
     """Точка входа: проверка статуса и запуск регистрации."""
 
-    try:
-        await message.delete()
-    except TelegramBadRequest:
-        pass
-
     await flash_message(message, "🔍 Проверяю доступ…", ttl=1.5)
 
     user_id = message.from_user.id
@@ -232,24 +228,53 @@ async def handle_start(message: types.Message, state: FSMContext) -> None:
 
     await state.clear()
     await state.set_state(RegistrationState.start)
-    await message.answer(
+    await _store_prompt(
+        message,
+        state,
         "Чтобы начать регистрацию, нажмите кнопку ниже.",
         reply_markup=start_registration_kb(),
     )
 
 
-@router.callback_query(RegistrationState.start, F.data == START_PAYLOAD)
-async def start_registration(callback: types.CallbackQuery, state: FSMContext) -> None:
-    """Запускает ввод фамилии после нажатия кнопки."""
+@router.message(RegistrationState.start, F.text == START_BUTTON)
+async def start_registration(message: types.Message, state: FSMContext) -> None:
+    """Запускает ввод фамилии после нажатия reply-кнопки."""
 
-    await callback.answer()
-    message = callback.message
-    if message is None:
-        return
-    await _safe_delete_message(callback.bot, message.chat.id, message.message_id)
+    await _register_user_input(state, message.message_id)
+    bot = message.bot
+    chat_id = message.chat.id
+    await _clear_user_inputs(state, bot=bot, chat_id=chat_id)
+    await _clear_data_message(state, "prompt_id", bot=bot, chat_id=chat_id)
     await state.set_state(RegistrationState.last_name)
     await state.update_data(last_name="", first_name="", patronymic="", prompt_id=None, error_id=None)
-    await _store_prompt(message, state, "Введите вашу Фамилию (только буквы).")
+    await _store_prompt(
+        message,
+        state,
+        "Введите вашу Фамилию (только буквы).",
+        reply_markup=types.ReplyKeyboardRemove(),
+    )
+
+
+@router.message(RegistrationState.start, F.text == CANCEL_BUTTON)
+@router.message(RegistrationState.last_name, F.text == CANCEL_BUTTON)
+@router.message(RegistrationState.first_name, F.text == CANCEL_BUTTON)
+@router.message(RegistrationState.patronymic, F.text == CANCEL_BUTTON)
+@router.message(RegistrationState.confirm, F.text == CANCEL_BUTTON)
+async def cancel_registration(message: types.Message, state: FSMContext) -> None:
+    """Отменяет регистрацию и очищает служебные сообщения."""
+
+    bot = message.bot
+    chat_id = message.chat.id
+    await _register_user_input(state, message.message_id)
+    await _clear_user_inputs(state, bot=bot, chat_id=chat_id)
+    await _clear_data_message(state, "prompt_id", bot=bot, chat_id=chat_id)
+    await _clear_data_message(state, "error_id", bot=bot, chat_id=chat_id)
+    await _clear_data_message(state, "confirm_id", bot=bot, chat_id=chat_id)
+    await state.clear()
+    await message.answer(
+        "Регистрация отменена. Для повторного запуска используйте команду /start.",
+        reply_markup=types.ReplyKeyboardRemove(),
+    )
 
 
 @router.message(RegistrationState.last_name)
@@ -263,6 +288,7 @@ async def process_last_name(message: types.Message, state: FSMContext) -> None:
         error_text="Некорректная фамилия",
         next_state=RegistrationState.first_name,
         data_key="last_name",
+        reply_markup=types.ReplyKeyboardRemove(),
     )
 
 
@@ -289,7 +315,7 @@ async def process_patronymic(message: types.Message, state: FSMContext) -> None:
     chat_id = message.chat.id
     text = (message.text or "").strip()
     await _register_user_input(state, message.message_id)
-    if text.casefold() == "пропустить":
+    if text.casefold() == SKIP_BUTTON.casefold():
         await state.update_data(patronymic="")
         await _clear_user_inputs(state, bot=bot, chat_id=chat_id)
         await _show_confirmation(message, state)
@@ -307,32 +333,15 @@ async def process_patronymic(message: types.Message, state: FSMContext) -> None:
     await _show_confirmation(message, state)
 
 
-@router.callback_query(RegistrationState.patronymic, F.data == SKIP_PAYLOAD)
-async def skip_patronymic(callback: types.CallbackQuery, state: FSMContext) -> None:
-    """Обрабатывает пропуск отчества через кнопку «Пропустить».
-
-    Сообщение с вопросом удаляется так же, как после успешного ввода.
-    """
-
-    await callback.answer()
-    message = callback.message
-    if message is None:
-        return
-    await state.update_data(patronymic="")
-    await _show_confirmation(message, state)
-
-
-@router.callback_query(RegistrationState.confirm, F.data == RETRY_PAYLOAD)
-async def retry_registration(callback: types.CallbackQuery, state: FSMContext) -> None:
+@router.message(RegistrationState.confirm, F.text == RETRY_BUTTON)
+async def retry_registration(message: types.Message, state: FSMContext) -> None:
     """Возвращает пользователя к началу ввода ФИО."""
 
-    await callback.answer()
-    message = callback.message
-    if message is None:
-        return
-    await _clear_data_message(
-        state, "confirm_id", bot=callback.bot, chat_id=message.chat.id
-    )
+    bot = message.bot
+    chat_id = message.chat.id
+    await _register_user_input(state, message.message_id)
+    await _clear_user_inputs(state, bot=bot, chat_id=chat_id)
+    await _clear_data_message(state, "confirm_id", bot=bot, chat_id=chat_id)
     await state.set_state(RegistrationState.last_name)
     await state.update_data(
         prompt_id=None,
@@ -342,17 +351,23 @@ async def retry_registration(callback: types.CallbackQuery, state: FSMContext) -
         patronymic="",
         input_ids=[],
     )
-    await _store_prompt(message, state, "Введите вашу Фамилию (только буквы).")
+    await _store_prompt(
+        message,
+        state,
+        "Введите вашу Фамилию (только буквы).",
+        reply_markup=types.ReplyKeyboardRemove(),
+    )
 
 
-@router.callback_query(RegistrationState.confirm, F.data == CONFIRM_PAYLOAD)
-async def confirm_registration(callback: types.CallbackQuery, state: FSMContext) -> None:
+@router.message(RegistrationState.confirm, F.text == CONFIRM_BUTTON)
+async def confirm_registration(message: types.Message, state: FSMContext) -> None:
     """Подтверждает данные и сохраняет запись в таблице."""
 
-    await callback.answer()
-    message = callback.message
-    if message is None:
-        return
+    bot = message.bot
+    chat_id = message.chat.id
+    await _register_user_input(state, message.message_id)
+    await _clear_user_inputs(state, bot=bot, chat_id=chat_id)
+    await _clear_data_message(state, "confirm_id", bot=bot, chat_id=chat_id)
 
     data = await state.get_data()
     last_name = data.get("last_name", "")
@@ -360,7 +375,10 @@ async def confirm_registration(callback: types.CallbackQuery, state: FSMContext)
     patronymic = data.get("patronymic", "")
 
     if not last_name or not first_name:
-        await message.answer("Данные регистрации потеряны. Нажмите /start и попробуйте снова.")
+        await message.answer(
+            "Данные регистрации потеряны. Нажмите /start и попробуйте снова.",
+            reply_markup=types.ReplyKeyboardRemove(),
+        )
         await state.clear()
         return
 
@@ -376,7 +394,7 @@ async def confirm_registration(callback: types.CallbackQuery, state: FSMContext)
         )
         return
 
-    user_id = callback.from_user.id
+    user_id = message.from_user.id
     try:
         await asyncio.to_thread(
             service.upsert_registration_row,
@@ -394,8 +412,10 @@ async def confirm_registration(callback: types.CallbackQuery, state: FSMContext)
         return
 
     await state.clear()
-    await callback.message.edit_reply_markup()
-    await message.answer("Регистрация завершена. Статус: Активен. Открываю панель.")
+    await message.answer(
+        "Регистрация завершена. Статус: Активен. Открываю панель.",
+        reply_markup=types.ReplyKeyboardRemove(),
+    )
     await flash_message(message, "✅ Регистрация завершена", ttl=2.0)
 
     try:
