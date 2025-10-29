@@ -76,7 +76,11 @@ async def show_screen(
     data = await state.get_data()
     screen_id = data.get("crew_screen_id")
 
-    if isinstance(screen_id, int):
+    can_edit = isinstance(screen_id, int) and (
+        reply_markup is None or isinstance(reply_markup, types.InlineKeyboardMarkup)
+    )
+
+    if can_edit:
         try:
             await message.bot.edit_message_text(
                 text,
