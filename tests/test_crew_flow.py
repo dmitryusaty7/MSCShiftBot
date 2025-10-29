@@ -617,6 +617,26 @@ def test_manual_driver_addition_moves_to_workers(monkeypatch) -> None:
     assert "рабочие пока не выбраны" in summary_message.text
 
 
+def test_workers_keyboard_persists_after_driver_selection(monkeypatch) -> None:
+    service, bot, data, state_value, chat_id = asyncio.run(_run_add_driver_flow(monkeypatch))
+
+    assert state_value == CrewState.WORKERS.state
+
+    keyboard_messages = [
+        message
+        for message in bot.sent_messages
+        if isinstance(message.reply_markup, ReplyKeyboardMarkup)
+        and ADD_WORKER_BUTTON in _flatten(message.reply_markup)
+    ]
+
+    assert keyboard_messages, "Reply-клавиатура рабочих должна отображаться"
+
+    last_keyboard_message = keyboard_messages[-1]
+    assert last_keyboard_message.text == crew.WORKERS_KEYBOARD_PLACEHOLDER
+    assert (chat_id, last_keyboard_message.message_id) not in bot.deleted
+    assert data.get("crew_workers_keyboard_message_id") == last_keyboard_message.message_id
+
+
 def test_manual_driver_addition_handles_name_variants(monkeypatch) -> None:
     def transform(name: str) -> str:
         return f"  {name.lower()}  "

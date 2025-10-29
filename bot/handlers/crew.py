@@ -37,7 +37,7 @@ from bot.services import (
     format_compact_fio,
     validate_name_piece,
 )
-from bot.utils.cleanup import send_screen_message
+from bot.utils.cleanup import remember_message, send_screen_message
 from bot.utils.flash import flash_message
 from bot.utils.textnorm import norm_text
 from features.utils.messaging import safe_delete
@@ -196,16 +196,45 @@ def _should_skip_middle(text: str | None) -> bool:
     return normalized in {"", "-", "—", "нет", "пропустить"}
 
 
-async def _sync_workers_keyboard(message: types.Message, markup: types.ReplyKeyboardMarkup) -> None:
-    """Обновляет reply-клавиатуру и удаляет вспомогательное сообщение."""
+WORKERS_KEYBOARD_PLACEHOLDER = "👥 Рабочие — клавиатура"
 
-    keyboard_message = await message.answer("👥 Рабочие — клавиатура", reply_markup=markup)
 
-    async def _cleanup(msg: types.Message) -> None:
-        await asyncio.sleep(0.2)
-        await safe_delete(msg)
+async def _remove_workers_keyboard(message: types.Message, state: FSMContext) -> None:
+    """Удаляет вспомогательное сообщение с Reply-клавиатурой рабочих."""
 
-    asyncio.create_task(_cleanup(keyboard_message))
+    data = await state.get_data()
+    keyboard_message_id = data.get("crew_workers_keyboard_message_id")
+    if not isinstance(keyboard_message_id, int):
+        return
+
+    try:
+        await message.bot.delete_message(message.chat.id, keyboard_message_id)
+    except TelegramBadRequest:
+        logger.debug(
+            "Не удалось удалить сообщение клавиатуры рабочих (id=%s)",
+            keyboard_message_id,
+            exc_info=False,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Ошибка при удалении сообщения клавиатуры рабочих (id=%s)",
+            keyboard_message_id,
+        )
+
+    await state.update_data(crew_workers_keyboard_message_id=None)
+
+
+async def _sync_workers_keyboard(
+    message: types.Message,
+    state: FSMContext,
+    markup: types.ReplyKeyboardMarkup,
+) -> None:
+    """Обновляет Reply-клавиатуру шага рабочих и сохраняет её сообщение."""
+
+    await _remove_workers_keyboard(message, state)
+    keyboard_message = await message.answer(WORKERS_KEYBOARD_PLACEHOLDER, reply_markup=markup)
+    remember_message(message.chat.id, keyboard_message.message_id)
+    await state.update_data(crew_workers_keyboard_message_id=keyboard_message.message_id)
 
 
 async def _refresh_driver_directory(state: FSMContext) -> list[CrewWorker]:
@@ -340,6 +369,7 @@ async def _ask_worker_middle(message: types.Message, state: FSMContext) -> None:
 
 
 async def _start_add_worker(message: types.Message, state: FSMContext) -> None:
+    await _remove_workers_keyboard(message, state)
     await state.update_data(
         crew_add_worker_last=None,
         crew_add_worker_first=None,
@@ -408,6 +438,7 @@ async def _finalize_worker_addition(message: types.Message, state: FSMContext) -
 
 
 async def _enter_intro(message: types.Message, state: FSMContext) -> None:
+    await _remove_workers_keyboard(message, state)
     await state.update_data(
         crew_map_buttons={},
         crew_confirmation_pending=False,
@@ -425,6 +456,7 @@ async def _enter_intro(message: types.Message, state: FSMContext) -> None:
 
 
 async def _enter_driver_step(message: types.Message, state: FSMContext) -> None:
+    await _remove_workers_keyboard(message, state)
     data = await state.get_data()
     drivers = _deserialize_workers(data.get("crew_drivers"))
     if not drivers:
@@ -486,12 +518,13 @@ async def _enter_workers_step(message: types.Message, state: FSMContext) -> None
         reply_markup=inline_markup,
     )
 
-    await _sync_workers_keyboard(message, markup)
+    await _sync_workers_keyboard(message, state, markup)
 
 
 async def _show_confirmation(message: types.Message, state: FSMContext) -> None:
     """Показывает экран подтверждения перед сохранением."""
 
+    await _remove_workers_keyboard(message, state)
     data = await state.get_data()
     drivers = _deserialize_workers(data.get("crew_drivers"))
     workers = _deserialize_workers(data.get("crew_workers"))
@@ -520,6 +553,7 @@ async def _show_confirmation(message: types.Message, state: FSMContext) -> None:
 
 
 async def _save_and_finish(message: types.Message, state: FSMContext) -> None:
+    await _remove_workers_keyboard(message, state)
     data = await state.get_data()
     drivers = _deserialize_workers(data.get("crew_drivers"))
     workers = _deserialize_workers(data.get("crew_workers"))
@@ -597,6 +631,7 @@ async def _prepare_references(state: FSMContext, user_id: int) -> tuple[int, lis
 
 
 async def _return_to_menu(message: types.Message, state: FSMContext) -> None:
+    await _remove_workers_keyboard(message, state)
     data = await state.get_data()
     user_id = data.get("crew_user_id")
     row = data.get("row")
