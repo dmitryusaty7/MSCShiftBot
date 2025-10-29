@@ -28,6 +28,7 @@ __all__ = [
     "make_driver_kb",
     "make_workers_kb",
     "make_confirmation_kb",
+    "make_middle_prompt_kb",
 ]
 
 
@@ -39,6 +40,7 @@ ADD_WORKER_BUTTON = "➕ добавить рабочего"
 CLEAR_WORKERS_BUTTON = "🧹 очистить список"
 CONFIRM_BUTTON = "✅ подтвердить"
 EDIT_BUTTON = "✏️ изменить"
+SKIP_MIDDLE_BUTTON = "Пропустить"
 
 
 def _builder_with_resize() -> ReplyKeyboardBuilder:
@@ -81,6 +83,8 @@ def make_driver_kb(
 def make_workers_kb(
     workers: Sequence[CrewWorker],
     selected_ids: Iterable[int],
+    *,
+    include_confirm: bool | None = None,
 ) -> Tuple[ReplyKeyboardMarkup, Dict[str, int]]:
     """Формирует клавиатуру мультивыбора рабочих и карту текстов."""
 
@@ -104,6 +108,10 @@ def make_workers_kb(
     builder.row(KeyboardButton(text=ADD_WORKER_BUTTON))
     builder.row(KeyboardButton(text=CLEAR_WORKERS_BUTTON))
 
+    include_confirm_flag = bool(selected_set) if include_confirm is None else include_confirm
+    if include_confirm_flag:
+        builder.row(KeyboardButton(text=CONFIRM_BUTTON))
+
     navigation: list[KeyboardButton] = [
         KeyboardButton(text=BACK_BUTTON),
         KeyboardButton(text=MENU_BUTTON),
@@ -120,4 +128,13 @@ def make_confirmation_kb() -> ReplyKeyboardMarkup:
     builder.row(KeyboardButton(text=CONFIRM_BUTTON))
     builder.row(KeyboardButton(text=EDIT_BUTTON))
     builder.row(KeyboardButton(text=MENU_BUTTON))
+    return builder.as_markup(resize_keyboard=True)
+
+
+def make_middle_prompt_kb() -> ReplyKeyboardMarkup:
+    """Клавиатура шага ввода отчества с кнопкой пропуска."""
+
+    builder = _builder_with_resize()
+    builder.row(KeyboardButton(text=SKIP_MIDDLE_BUTTON))
+    builder.row(KeyboardButton(text=BACK_BUTTON), KeyboardButton(text=MENU_BUTTON))
     return builder.as_markup(resize_keyboard=True)

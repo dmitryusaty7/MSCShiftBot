@@ -76,7 +76,7 @@ def test_workers_keyboard_shows_confirm_only_with_selection() -> None:
 
     markup_full, _ = make_workers_kb(workers, [1, 3])
     texts_full = _flatten(markup_full)
-    assert CONFIRM_BUTTON not in texts_full
+    assert CONFIRM_BUTTON in texts_full
 
 
 def test_confirmation_keyboard_contains_expected_buttons() -> None:
@@ -99,7 +99,7 @@ def test_inline_summary_contains_toggle_buttons() -> None:
 
     buttons = [button for row in markup.inline_keyboard for button in row]
 
-    assert any(button.callback_data == WORKERS_CONFIRM_CALLBACK for button in buttons)
+    assert all(button.callback_data != WORKERS_CONFIRM_CALLBACK for button in buttons)
     toggle_buttons = [button for button in buttons if button.callback_data.startswith(WORKER_TOGGLE_PREFIX)]
     assert toggle_buttons
     assert any(button.text.startswith("✖") for button in toggle_buttons)
@@ -361,9 +361,14 @@ async def _run_flow(monkeypatch) -> tuple[StubCrewService, StubBot]:
         data = await state.get_data()
         assert data.get("crew_selected_worker_ids") == [2]
 
-        updated_summary = bot._storage[(chat_id, summary_id)]
-        confirm_callback = DummyCallback(updated_summary, WORKERS_CONFIRM_CALLBACK)
-        await crew.handle_workers_confirm(confirm_callback, state)
+        confirm_message = DummyMessage(
+            bot=bot,
+            chat_id=chat_id,
+            user_id=user_id,
+            message_id=bot.allocate_id(),
+            text=CONFIRM_BUTTON,
+        )
+        await crew.handle_workers_step(confirm_message, state)
 
         assert service.saved_calls
         assert await state.get_state() is None

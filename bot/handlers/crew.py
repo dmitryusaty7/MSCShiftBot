@@ -28,6 +28,7 @@ from bot.keyboards.crew_reply import (
     make_confirmation_kb,
     make_driver_kb,
     make_intro_kb,
+    make_middle_prompt_kb,
     make_workers_kb,
 )
 from bot.services import (
@@ -39,6 +40,7 @@ from bot.services import (
 from bot.utils.cleanup import remember_message, send_screen_message
 from bot.utils.flash import flash_message
 from bot.utils.textnorm import norm_text
+from features.utils.messaging import safe_delete
 
 router = Router(name="crew")
 logger = logging.getLogger(__name__)
@@ -157,15 +159,12 @@ def _driver_step_text(driver: CrewWorker | None) -> str:
 def _workers_step_text(driver: CrewWorker | None, selected: Sequence[CrewWorker]) -> str:
     driver_name = driver.name if driver else "—"
     lines = [
-        "🧑‍🔧 Рабочие",
+        "🧑‍🔧 Рабочие — выбор на клавиатуре",
         f"водитель: {driver_name}",
-        f"выбрано: {len(selected)}",
         "",
-        "тап по имени — добавляет/удаляет из списка",
+        "Используйте клавиатуру ниже, чтобы добавить рабочих.",
+        "Актуальная сводка и кнопки удаления — в сообщении ниже.",
     ]
-    if selected:
-        lines.extend(["", "выбранные:"])
-        lines.extend(f"• {worker.name}" for worker in selected)
     return "\n".join(lines)
 
 
@@ -196,7 +195,7 @@ def _selected_ids(data: dict[str, Any]) -> list[int]:
 
 def _should_skip_middle(text: str | None) -> bool:
     normalized = _norm(text)
-    return normalized in {"", "-", "—", "нет"}
+    return normalized in {"", "-", "—", "нет", "пропустить"}
 
 
 async def _refresh_driver_directory(state: FSMContext) -> list[CrewWorker]:
@@ -235,8 +234,8 @@ async def _ask_driver_middle(message: types.Message, state: FSMContext) -> None:
     await show_screen(
         message,
         state,
-        text="Введите отчество (если нет, оставьте пустым или отправьте «-»):",
-        reply_markup=types.ReplyKeyboardRemove(),
+        text="Введите отчество (если нет, нажмите «Пропустить»):",
+        reply_markup=make_middle_prompt_kb(),
     )
 
 
@@ -325,8 +324,8 @@ async def _ask_worker_middle(message: types.Message, state: FSMContext) -> None:
     await show_screen(
         message,
         state,
-        text="Введите отчество (если нет, оставьте пустым или отправьте «-»):",
-        reply_markup=types.ReplyKeyboardRemove(),
+        text="Введите отчество (если нет, нажмите «Пропустить»):",
+        reply_markup=make_middle_prompt_kb(),
     )
 
 
@@ -827,6 +826,7 @@ async def handle_workers_step(message: types.Message, state: FSMContext) -> None
     )
     text = message.text or ""
     text_norm = _norm(text)
+    await safe_delete(message)
 
     if text_norm == _norm(MENU_BUTTON):
         await state.update_data(crew_confirmation_pending=False)
@@ -847,6 +847,9 @@ async def handle_workers_step(message: types.Message, state: FSMContext) -> None
         )
         await flash_message(message, "Список рабочих очищен.")
         await _enter_workers_step(message, state)
+        return
+    if text_norm == _norm(CONFIRM_BUTTON):
+        await _save_and_finish(message, state)
         return
 
     data = await state.get_data()

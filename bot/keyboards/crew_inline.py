@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from bot.services import CrewWorker
@@ -30,29 +30,25 @@ def make_workers_inline_summary(
         "👥 Состав бригады — сводка",
         f"водитель: {driver_name}",
         "",
+        "выбранные рабочие:",
     ]
 
     if selected:
-        lines.append("выбранные рабочие:")
         lines.extend(f"• {worker.name}" for worker in selected)
     else:
-        lines.append("рабочие пока не выбраны.")
+        lines.append("• —")
 
-    lines.extend(["", "✖ — удалить рабочего из списка"])
+    lines.extend(["", "✖️ — удалить рабочего из списка"])
 
-    if selected:
-        builder = InlineKeyboardBuilder()
-        for worker in selected:
-            builder.button(
-                text=f"✖ {worker.name}",
-                callback_data=f"{WORKER_TOGGLE_PREFIX}{worker.worker_id}",
-            )
-        builder.adjust(2)
-        builder.row(
-            InlineKeyboardButton(text="✅ подтвердить", callback_data=WORKERS_CONFIRM_CALLBACK)
+    if not selected:
+        return "\n".join(lines), None
+
+    builder = InlineKeyboardBuilder()
+    for worker in selected:
+        builder.button(
+            text=f"✖ {worker.name}",
+            callback_data=f"{WORKER_TOGGLE_PREFIX}{worker.worker_id}",
         )
-        markup: InlineKeyboardMarkup | None = builder.as_markup()
-    else:
-        markup = None
+    builder.adjust(2)
 
-    return "\n".join(lines), markup
+    return "\n".join(lines), builder.as_markup()
