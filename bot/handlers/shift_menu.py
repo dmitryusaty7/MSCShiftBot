@@ -432,7 +432,7 @@ async def handle_crew(message: types.Message, state: FSMContext) -> None:
         message,
         state,
         mode=Mode.CREW,
-        module_path="features.crew",
+        module_path="bot.handlers.crew",
         func_name="start_crew",
     )
 
