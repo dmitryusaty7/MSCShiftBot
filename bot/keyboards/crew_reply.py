@@ -23,9 +23,11 @@ __all__ = [
     "ADD_DRIVER_BUTTON",
     "CLEAR_WORKERS_BUTTON",
     "CONFIRM_BUTTON",
+    "EDIT_BUTTON",
     "make_intro_kb",
     "make_driver_kb",
     "make_workers_kb",
+    "make_confirmation_kb",
 ]
 
 
@@ -36,6 +38,7 @@ NEXT_BUTTON = "➡ далее"
 ADD_DRIVER_BUTTON = "➕ добавить водителя"
 CLEAR_WORKERS_BUTTON = "🧹 очистить список"
 CONFIRM_BUTTON = "✅ подтвердить"
+EDIT_BUTTON = "✏️ изменить"
 
 
 def _builder_with_resize() -> ReplyKeyboardBuilder:
@@ -115,3 +118,13 @@ def make_workers_kb(
     builder.row(*navigation)
 
     return builder.as_markup(resize_keyboard=True), mapping
+
+
+def make_confirmation_kb() -> ReplyKeyboardMarkup:
+    """Возвращает клавиатуру экрана подтверждения."""
+
+    builder = _builder_with_resize()
+    builder.row(KeyboardButton(text=CONFIRM_BUTTON))
+    builder.row(KeyboardButton(text=EDIT_BUTTON))
+    builder.row(KeyboardButton(text=MENU_BUTTON))
+    return builder.as_markup(resize_keyboard=True)

@@ -14,9 +14,11 @@ from bot.handlers import crew, shift_menu
 from bot.handlers.crew import CrewState
 from bot.keyboards.crew_reply import (
     CONFIRM_BUTTON,
+    EDIT_BUTTON,
     MENU_BUTTON,
     NEXT_BUTTON,
     START_BUTTON,
+    make_confirmation_kb,
     make_driver_kb,
     make_intro_kb,
     make_workers_kb,
@@ -67,6 +69,12 @@ def test_workers_keyboard_shows_confirm_only_with_selection() -> None:
     markup_full, _ = make_workers_kb(workers, [1, 3])
     texts_full = _flatten(markup_full)
     assert CONFIRM_BUTTON in texts_full
+
+
+def test_confirmation_keyboard_contains_expected_buttons() -> None:
+    markup = make_confirmation_kb()
+    texts = _flatten(markup)
+    assert texts == [CONFIRM_BUTTON, EDIT_BUTTON, MENU_BUTTON]
 
 
 def test_inline_summary_contains_toggle_buttons() -> None:
@@ -321,6 +329,7 @@ async def _run_flow(monkeypatch) -> tuple[StubCrewService, StubBot]:
         await crew.handle_workers_step(worker_message, state)
         data = await state.get_data()
         assert data.get("crew_selected_worker_ids") == [2]
+        assert data.get("crew_selected_worker_names") == ["Рабочий Б"]
 
         summary_id = data.get("crew_list_msg_id")
         assert isinstance(summary_id, int)
@@ -330,10 +339,10 @@ async def _run_flow(monkeypatch) -> tuple[StubCrewService, StubBot]:
         await crew.handle_workers_inline(callback_remove, state)
         data = await state.get_data()
         assert data.get("crew_selected_worker_ids") == []
+        assert data.get("crew_selected_worker_names") == []
 
-        summary_message = bot._storage[(chat_id, summary_id)]
-        callback_add = DummyCallback(summary_message, f"{WORKER_TOGGLE_PREFIX}2")
-        await crew.handle_workers_inline(callback_add, state)
+        # повторный выбор через Reply добавляет обратно
+        await crew.handle_workers_step(worker_message, state)
         data = await state.get_data()
         assert data.get("crew_selected_worker_ids") == [2]
 
@@ -345,6 +354,42 @@ async def _run_flow(monkeypatch) -> tuple[StubCrewService, StubBot]:
             text=CONFIRM_BUTTON,
         )
         await crew.handle_workers_step(confirm_message, state)
+
+        data = await state.get_data()
+        assert data.get("crew_confirmation_pending") is True
+        assert not service.saved_calls
+
+        edit_message = DummyMessage(
+            bot=bot,
+            chat_id=chat_id,
+            user_id=user_id,
+            message_id=bot.allocate_id(),
+            text=EDIT_BUTTON,
+        )
+        await crew.handle_workers_step(edit_message, state)
+        data = await state.get_data()
+        assert not data.get("crew_confirmation_pending")
+
+        # Повторное подтверждение -> снова сводка
+        confirm_message_2 = DummyMessage(
+            bot=bot,
+            chat_id=chat_id,
+            user_id=user_id,
+            message_id=bot.allocate_id(),
+            text=CONFIRM_BUTTON,
+        )
+        await crew.handle_workers_step(confirm_message_2, state)
+        data = await state.get_data()
+        assert data.get("crew_confirmation_pending") is True
+
+        confirm_finish = DummyMessage(
+            bot=bot,
+            chat_id=chat_id,
+            user_id=user_id,
+            message_id=bot.allocate_id(),
+            text=CONFIRM_BUTTON,
+        )
+        await crew.handle_workers_step(confirm_finish, state)
 
         assert service.saved_calls
         assert await state.get_state() is None
