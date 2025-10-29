@@ -11,12 +11,12 @@ from pathlib import Path
 from aiogram import Bot, Dispatcher
 from dotenv import load_dotenv
 
+from bot.handlers.registration import router as registration_router
 from features.crew import router as crew_router
 from features.expenses import router as expenses_router
 from features.materials import router as materials_router
 from features.main_menu import router as main_menu_router
 from features.shift_menu import router as shift_menu_router
-from features.registration import router as registration_router
 from services.env import require_env
 
 
