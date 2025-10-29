@@ -33,6 +33,12 @@ class CrewSheetsService:
         return self._base.get_shift_summary(row)
 
     # Работа со справочником рабочих ------------------------------------
+    def list_active_drivers(self) -> list[CrewWorker]:
+        """Возвращает доступных водителей с числовыми идентификаторами."""
+
+        names = self._base.list_active_drivers()
+        return [CrewWorker(worker_id=index + 1, name=name) for index, name in enumerate(names)]
+
     def list_active_workers(self) -> list[CrewWorker]:
         names = self._base.list_active_workers()
         return [CrewWorker(worker_id=index + 1, name=name) for index, name in enumerate(names)]

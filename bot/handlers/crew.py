@@ -1,10 +1,10 @@
-"""Новый сценарий раздела «Бригада» с мгновенным списком рабочих."""
+"""Пошаговый сценарий раздела «Бригада»: водитель → рабочие → подтверждение."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Dict, List
+from typing import Any, Iterable, Sequence
 
 from aiogram import F, Router, types
 from aiogram.exceptions import TelegramBadRequest
@@ -12,17 +12,31 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from bot.keyboards.crew_inline import REMOVE_PREFIX, make_list_kb
+from bot.keyboards.crew_inline import (
+    CONFIRM_CALLBACK,
+    DRIVER_ADD_CALLBACK,
+    DRIVER_LIST_PREFIX,
+    DRIVER_PICK_PREFIX,
+    NAV_BACK_CALLBACK,
+    NAV_HOME_CALLBACK,
+    NOOP_CALLBACK,
+    WORKER_ADD_CALLBACK,
+    WORKER_CLEAR_CALLBACK,
+    WORKER_LIST_PREFIX,
+    WORKER_TOGGLE_PREFIX,
+    build_driver_keyboard,
+    build_worker_keyboard,
+)
 from bot.keyboards.crew_reply import (
     ADD_WORKER_BUTTON,
     BACK_BUTTON,
     CLEAR_WORKERS_BUTTON,
     CONFIRM_BUTTON,
     EDIT_BUTTON,
+    MENU_BUTTON,
     crew_confirm_keyboard,
     crew_start_keyboard,
 )
-from bot.keyboards.dashboard import SHIFT_BACK_BUTTON
 from bot.services import CrewSheetsService, CrewWorker
 from bot.utils.cleanup import cleanup_screen, remember_message, send_screen_message
 from bot.utils.flash import flash_message
@@ -31,105 +45,21 @@ from features.utils.messaging import safe_delete
 router = Router(name="crew")
 logger = logging.getLogger(__name__)
 
-_service: CrewSheetsService | None = None
-
 
 class CrewState(StatesGroup):
-    """Состояния раздела «Бригада» в новом боте."""
+    """Состояния сценария «Бригада»"""
 
+    DRIVER = State()
     WORKERS = State()
-    AWAIT_WORKER = State()
     CONFIRM = State()
 
 
-# Работа с контекстом -----------------------------------------------------
-
-def _make_tracker() -> Dict[str, Any]:
-    return {"prompt_id": None, "user_messages": [], "bot_messages": []}
+_service: CrewSheetsService | None = None
 
 
-async def _get_context(state: FSMContext) -> Dict[str, Any]:
-    data = await state.get_data()
-    context = data.get("crew_ctx")
-    if not isinstance(context, dict):
-        context = {}
-    tracker = context.get("tracker")
-    if not isinstance(tracker, dict):
-        tracker = _make_tracker()
-    else:
-        tracker.setdefault("prompt_id", None)
-        tracker.setdefault("user_messages", [])
-        tracker.setdefault("bot_messages", [])
-    context["tracker"] = tracker
-    return context
+# ---------------------------------------------------------------------------
+# Служебные функции работы с данными состояния
 
-
-async def _save_context(state: FSMContext, context: Dict[str, Any]) -> None:
-    await state.update_data(crew_ctx=context)
-
-
-async def _set_prompt(message: types.Message, state: FSMContext, *, prompt: types.Message) -> None:
-    context = await _get_context(state)
-    tracker = _make_tracker()
-    tracker["prompt_id"] = prompt.message_id
-    context["tracker"] = tracker
-    await _save_context(state, context)
-    remember_message(message.chat.id, prompt.message_id)
-
-
-async def _add_user_message(state: FSMContext, message_id: int, chat_id: int) -> None:
-    context = await _get_context(state)
-    tracker = context.get("tracker", _make_tracker())
-    tracker.setdefault("user_messages", []).append(message_id)
-    context["tracker"] = tracker
-    await _save_context(state, context)
-    remember_message(chat_id, message_id)
-
-
-async def _add_bot_message(state: FSMContext, message_id: int, chat_id: int) -> None:
-    context = await _get_context(state)
-    tracker = context.get("tracker", _make_tracker())
-    tracker.setdefault("bot_messages", []).append(message_id)
-    context["tracker"] = tracker
-    await _save_context(state, context)
-    remember_message(chat_id, message_id)
-
-
-async def _cleanup_step(message: types.Message, state: FSMContext) -> None:
-    context = await _get_context(state)
-    tracker = context.get("tracker", _make_tracker())
-    chat_id = message.chat.id
-    bot = message.bot
-    prompt_id = tracker.get("prompt_id")
-    bot_messages = tracker.get("bot_messages", [])
-    user_messages = tracker.get("user_messages", [])
-    ids: List[int] = []
-    if prompt_id:
-        ids.append(prompt_id)
-    ids.extend(bot_messages)
-    for message_id in ids:
-        if not message_id:
-            continue
-        try:
-            await bot.delete_message(chat_id, message_id)
-        except TelegramBadRequest:
-            logger.debug("Сообщение %s уже удалено", message_id)
-        except Exception:  # noqa: BLE001
-            logger.warning("Не удалось удалить сообщение %s", message_id, exc_info=True)
-    for message_id in user_messages:
-        if not message_id:
-            continue
-        try:
-            await bot.delete_message(chat_id, message_id)
-        except TelegramBadRequest:
-            logger.debug("Сообщение пользователя %s уже удалено", message_id)
-        except Exception:  # noqa: BLE001
-            logger.warning("Не удалось удалить сообщение пользователя %s", message_id, exc_info=True)
-    context["tracker"] = _make_tracker()
-    await _save_context(state, context)
-
-
-# Служебные функции --------------------------------------------------------
 
 def _get_service() -> CrewSheetsService:
     global _service
@@ -138,46 +68,41 @@ def _get_service() -> CrewSheetsService:
     return _service
 
 
-def _serialize_worker(worker: CrewWorker) -> Dict[str, Any]:
-    return {"id": worker.worker_id, "name": worker.name}
+def _serialize_workers(workers: Sequence[CrewWorker]) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": worker.worker_id,
+            "name": worker.name,
+        }
+        for worker in workers
+    ]
 
 
-def _deserialize_worker(raw: Any) -> CrewWorker | None:
-    if not isinstance(raw, dict):
-        return None
-    worker_id = raw.get("id")
-    name = raw.get("name")
-    if not isinstance(worker_id, int) or not isinstance(name, str):
-        return None
-    return CrewWorker(worker_id=worker_id, name=name)
-
-
-def _deserialize_workers(items: Any) -> list[CrewWorker]:
-    if not isinstance(items, list):
+def _deserialize_workers(raw: Iterable[dict[str, Any]] | None) -> list[CrewWorker]:
+    if not raw:
         return []
     result: list[CrewWorker] = []
-    for raw in items:
-        worker = _deserialize_worker(raw)
-        if worker is not None:
-            result.append(worker)
+    for item in raw:
+        worker_id = item.get("id") if isinstance(item, dict) else None
+        name = item.get("name") if isinstance(item, dict) else None
+        if isinstance(worker_id, int) and isinstance(name, str):
+            result.append(CrewWorker(worker_id=worker_id, name=name))
     return result
 
 
-def _worker_map(context: Dict[str, Any]) -> dict[int, CrewWorker]:
-    workers_raw = context.get("workers", [])
-    workers = _deserialize_workers(workers_raw)
+def _workers_map(workers: Sequence[CrewWorker]) -> dict[int, CrewWorker]:
     return {worker.worker_id: worker for worker in workers}
 
 
-async def _update_screen(
+async def _set_screen_message(
     message: types.Message,
     state: FSMContext,
     *,
     text: str,
     reply_markup: Any,
 ) -> None:
-    context = await _get_context(state)
-    screen_id = context.get("screen_message_id")
+    data = await state.get_data()
+    screen_id = data.get("crew_screen_id")
     if isinstance(screen_id, int) and screen_id > 0:
         try:
             await message.bot.edit_message_text(
@@ -186,124 +111,170 @@ async def _update_screen(
                 message_id=screen_id,
                 reply_markup=reply_markup,
             )
+            return
         except TelegramBadRequest as exc:
-            logger.debug("Не удалось обновить экран: %s", exc)
-            screen = await send_screen_message(
-                message,
-                text,
-                reply_markup=reply_markup,
-            )
-            context["screen_message_id"] = screen.message_id
-            await _save_context(state, context)
-    else:
-        screen = await send_screen_message(
-            message,
-            text,
-            reply_markup=reply_markup,
-        )
-        context["screen_message_id"] = screen.message_id
-        await _save_context(state, context)
+            logger.debug("Не удалось обновить экран режима «Бригада»: %s", exc)
+    screen = await send_screen_message(message, text, reply_markup=reply_markup)
+    await state.update_data(crew_screen_id=screen.message_id)
 
 
-async def _render_workers_list(message: types.Message, state: FSMContext) -> None:
-    context = await _get_context(state)
-    selected_ids: list[int] = context.get("selected_worker_ids", []) or []
-    workers_map = _worker_map(context)
-    selected_workers = [workers_map[w_id] for w_id in selected_ids if w_id in workers_map]
-
-    if not selected_workers:
-        text = "выбранные рабочие:\n—"
-    else:
-        lines = ["выбранные рабочие:"]
-        lines.extend(f"{idx + 1}) {worker.name}" for idx, worker in enumerate(selected_workers))
-        text = "\n".join(lines)
-
-    markup = make_list_kb(selected_workers)
-
-    message_id = context.get("workers_message_id")
-    if isinstance(message_id, int) and message_id > 0:
+async def _set_inline_message(
+    message: types.Message,
+    state: FSMContext,
+    *,
+    text: str,
+    reply_markup: Any,
+) -> None:
+    data = await state.get_data()
+    inline_id = data.get("crew_inline_id")
+    if isinstance(inline_id, int) and inline_id > 0:
         try:
             await message.bot.edit_message_text(
                 text,
                 chat_id=message.chat.id,
-                message_id=message_id,
-                reply_markup=markup,
+                message_id=inline_id,
+                reply_markup=reply_markup,
             )
+            return
         except TelegramBadRequest as exc:
-            logger.debug("Не удалось обновить сообщение списка: %s", exc)
-            sent = await message.answer(text, reply_markup=markup)
-            remember_message(message.chat.id, sent.message_id)
-            context["workers_message_id"] = sent.message_id
-            await _save_context(state, context)
-    else:
-        sent = await message.answer(text, reply_markup=markup)
-        remember_message(message.chat.id, sent.message_id)
-        context["workers_message_id"] = sent.message_id
-        await _save_context(state, context)
+            logger.debug("Не удалось обновить inline-сообщение бригады: %s", exc)
+    inline_message = await message.answer(text, reply_markup=reply_markup)
+    remember_message(message.chat.id, inline_message.message_id)
+    await state.update_data(crew_inline_id=inline_message.message_id)
 
 
-async def _return_to_menu(message: types.Message, state: FSMContext) -> None:
-    context = await _get_context(state)
-    user_id = context.get("user_id")
-    row = context.get("row")
-    if not isinstance(user_id, int) or not isinstance(row, int):
-        await message.answer("Не удалось определить смену для возврата в меню.")
-        return
+async def _resolve_user_id(
+    message: types.Message,
+    state: FSMContext,
+    provided: int | None,
+) -> int | None:
+    if provided is not None:
+        return provided
 
-    from bot.handlers.shift_menu import render_shift_menu
+    if message.from_user and not message.from_user.is_bot:
+        return message.from_user.id
 
-    await cleanup_screen(message.bot, message.chat.id, keep_start=False)
-    await state.clear()
-    service = _get_service()
-    base_service = getattr(service, "base_service", lambda: service)()
+    data = await state.get_data()
+    for key in ("crew_user_id", "user_id", "_shift_user_id"):
+        candidate = data.get(key)
+        if isinstance(candidate, int):
+            return candidate
+        if isinstance(candidate, str) and candidate.isdigit():
+            return int(candidate)
 
-    await render_shift_menu(
-        message,
-        user_id,
-        row,
-        state=state,
-        delete_trigger_message=False,
-        show_progress=False,
-        use_screen_message=True,
-        service=base_service,
-    )
+    if message.chat.type == "private":
+        return message.chat.id
+    return None
 
 
-async def _go_home(message: types.Message, state: FSMContext) -> None:
-    from bot.handlers.dashboard import show_dashboard
-
-    await cleanup_screen(message.bot, message.chat.id, keep_start=False)
-    await state.clear()
-    await show_dashboard(message, state=state)
-
-
-def _screen_intro() -> str:
+def _intro_text() -> str:
     return (
         "👥 Состав бригады — ввод данных\n\n"
-        "Добавляйте рабочих в состав смены и подтверждайте список перед сохранением.\n"
-        "Используйте кнопку очистки, чтобы начать заново, или подтвердите готовый список."
+        "Выберите водителя, затем добавьте рабочих из списка.\n"
+        "Перед сохранением проверьте состав и подтвердите изменения."
     )
 
 
-async def _show_intro(message: types.Message, state: FSMContext) -> None:
-    await _update_screen(
-        message,
-        state,
-        text=_screen_intro(),
-        reply_markup=crew_start_keyboard(),
+async def _render_driver_step(message: types.Message, state: FSMContext, *, page: int | None = None) -> None:
+    data = await state.get_data()
+    drivers = _deserialize_workers(data.get("crew_drivers"))
+    if not drivers:
+        await flash_message(message, "Справочник водителей пуст. Обратитесь к координатору.", ttl=2)
+        return
+
+    selected_driver_id = data.get("crew_driver_id") if isinstance(data.get("crew_driver_id"), int) else None
+    target_page = page if page is not None else data.get("crew_driver_page", 0)
+    markup, actual_page, total_pages = build_driver_keyboard(
+        drivers,
+        page=target_page,
+        selected_driver_id=selected_driver_id,
     )
+    await state.update_data(crew_driver_page=actual_page)
+
+    driver_name = None
+    if selected_driver_id:
+        driver_name = _workers_map(drivers).get(selected_driver_id)
+        driver_name = driver_name.name if driver_name else None
+
+    lines = ["🚚 Водитель", "выберите водителя из списка"]
+    if driver_name:
+        lines.append(f"текущий выбор: {driver_name}")
+    else:
+        lines.append("текущий выбор: не выбран")
+    if total_pages > 1:
+        lines.append(f"страница {actual_page + 1} из {total_pages}")
+
+    await _set_inline_message(message, state, text="\n".join(lines), reply_markup=markup)
+    await state.set_state(CrewState.DRIVER)
+
+
+async def _render_worker_step(
+    message: types.Message,
+    state: FSMContext,
+    *,
+    page: int | None = None,
+) -> None:
+    data = await state.get_data()
+    drivers = _deserialize_workers(data.get("crew_drivers"))
+    workers = _deserialize_workers(data.get("crew_workers"))
+    driver_id = data.get("crew_driver_id")
+    if not isinstance(driver_id, int):
+        await flash_message(message, "Сначала выберите водителя.", ttl=2)
+        await _render_driver_step(message, state)
+        return
+
+    if not workers:
+        await flash_message(message, "Справочник рабочих пуст. Обратитесь к координатору.", ttl=2)
+        await _render_driver_step(message, state)
+        return
+
+    selected_ids = data.get("crew_selected_worker_ids", []) or []
+    target_page = page if page is not None else data.get("crew_worker_page", 0)
+    markup, actual_page, total_pages = build_worker_keyboard(
+        workers,
+        page=target_page,
+        selected_ids=selected_ids,
+    )
+    await state.update_data(crew_worker_page=actual_page)
+
+    driver = _workers_map(drivers).get(driver_id)
+    driver_name = driver.name if driver else "—"
+    selected_workers = [_workers_map(workers).get(w_id) for w_id in selected_ids]
+    selected_workers = [worker for worker in selected_workers if worker is not None]
+
+    lines = [
+        "🧑‍🔧 Рабочие",
+        f"водитель: {driver_name}",
+        f"выбрано: {len(selected_workers)}",
+        "",
+        "тап по имени — добавляет/удаляет из списка",
+    ]
+    if selected_workers:
+        lines.append("")
+        lines.append("выбранные:")
+        lines.extend(f"• {worker.name}" for worker in selected_workers)
+    if total_pages > 1:
+        lines.append("")
+        lines.append(f"страница {actual_page + 1} из {total_pages}")
+
+    await _set_inline_message(message, state, text="\n".join(lines), reply_markup=markup)
+    await state.set_state(CrewState.WORKERS)
 
 
 async def _show_confirm_screen(message: types.Message, state: FSMContext) -> None:
-    context = await _get_context(state)
-    workers_map = _worker_map(context)
-    selected_ids: list[int] = context.get("selected_worker_ids", []) or []
-    selected_workers = [workers_map[w_id] for w_id in selected_ids if w_id in workers_map]
-    driver = context.get("driver") or "—"
+    data = await state.get_data()
+    drivers = _deserialize_workers(data.get("crew_drivers"))
+    workers = _deserialize_workers(data.get("crew_workers"))
+    driver_id = data.get("crew_driver_id")
+    selected_ids = data.get("crew_selected_worker_ids", []) or []
+    driver = _workers_map(drivers).get(driver_id) if isinstance(driver_id, int) else None
+    worker_map = _workers_map(workers)
+    selected_workers = [worker_map.get(w_id) for w_id in selected_ids]
+    selected_workers = [worker for worker in selected_workers if worker is not None]
 
     lines = [
         "Проверьте состав бригады:",
-        f"водитель: {driver or '—'}",
+        f"водитель: {driver.name if driver else '—'}",
         "рабочие:",
     ]
     if selected_workers:
@@ -311,123 +282,31 @@ async def _show_confirm_screen(message: types.Message, state: FSMContext) -> Non
     else:
         lines.append("- —")
     lines.append("")
-    lines.append("Сохранить?")
+    lines.append("Сохранить изменения?")
 
-    await _update_screen(
-        message,
-        state,
-        text="\n".join(lines),
-        reply_markup=crew_confirm_keyboard(),
-    )
+    await _set_screen_message(message, state, text="\n".join(lines), reply_markup=crew_confirm_keyboard())
+    await state.set_state(CrewState.CONFIRM)
 
 
-async def _prompt_worker_selection(message: types.Message, state: FSMContext) -> None:
-    context = await _get_context(state)
-    workers_map = _worker_map(context)
-    if not workers_map:
-        reply = await message.answer("Справочник рабочих пуст. Обратитесь к координатору.")
-        await _add_bot_message(state, reply.message_id, message.chat.id)
-        return
-
-    lines = ["Укажите номер рабочего из списка:"]
-    for worker in workers_map.values():
-        lines.append(f"{worker.worker_id}) {worker.name}")
-
-    prompt = await message.answer("\n".join(lines))
-    await _set_prompt(message, state, prompt=prompt)
-    await state.set_state(CrewState.AWAIT_WORKER)
+async def _show_intro(message: types.Message, state: FSMContext) -> None:
+    await _set_screen_message(message, state, text=_intro_text(), reply_markup=crew_start_keyboard())
 
 
-async def _add_worker_by_id(message: types.Message, state: FSMContext, worker_id: int) -> None:
-    context = await _get_context(state)
-    selected_ids: list[int] = context.get("selected_worker_ids", []) or []
-    workers_map = _worker_map(context)
-    worker = workers_map.get(worker_id)
-    if worker is None:
-        reply = await message.answer("Рабочий с таким номером не найден. Используйте список выше.")
-        await _add_bot_message(state, reply.message_id, message.chat.id)
-        return
-
-    if worker_id in selected_ids:
-        reply = await message.answer("Этот рабочий уже выбран.")
-        await _add_bot_message(state, reply.message_id, message.chat.id)
-        return
-
-    selected_ids.append(worker_id)
-    context["selected_worker_ids"] = selected_ids
-    await _save_context(state, context)
-
-    await _cleanup_step(message, state)
-    await flash_message(message, f"Добавлено: {worker.name}", ttl=1.5)
-    await _render_workers_list(message, state)
-    await _show_intro(message, state)
-    await state.set_state(CrewState.WORKERS)
-
-
-async def _remove_worker(message: types.Message, state: FSMContext, worker_id: int) -> str | None:
-    context = await _get_context(state)
-    selected_ids: list[int] = context.get("selected_worker_ids", []) or []
-    workers_map = _worker_map(context)
-    if worker_id not in selected_ids:
-        return None
-    selected_ids = [wid for wid in selected_ids if wid != worker_id]
-    context["selected_worker_ids"] = selected_ids
-    await _save_context(state, context)
-    await _render_workers_list(message, state)
-    worker = workers_map.get(worker_id)
-    return worker.name if worker else None
-
-
-async def _complete_crew(message: types.Message, state: FSMContext) -> None:
-    context = await _get_context(state)
-    user_id = context.get("user_id")
-    row = context.get("row")
-    selected_ids: list[int] = context.get("selected_worker_ids", []) or []
-    workers_map = _worker_map(context)
-    workers = [workers_map[w_id] for w_id in selected_ids if w_id in workers_map]
-    driver = context.get("driver")
-
+async def _return_to_shift_menu(message: types.Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    user_id = data.get("crew_user_id")
+    row = data.get("crew_row")
     if not isinstance(user_id, int) or not isinstance(row, int):
-        reply = await message.answer("Не удалось определить смену для сохранения.")
-        await _add_bot_message(state, reply.message_id, message.chat.id)
-        return
-    if not workers:
-        reply = await message.answer("Нужно выбрать хотя бы одного рабочего.")
-        await _add_bot_message(state, reply.message_id, message.chat.id)
-        await _show_intro(message, state)
-        await state.set_state(CrewState.WORKERS)
+        await flash_message(message, "Не удалось определить смену для возврата.", ttl=2)
         return
 
-    await flash_message(message, "💾 Сохраняю…", ttl=2.0)
+    from bot.handlers.shift_menu import render_shift_menu
+
     service = _get_service()
-    try:
-        await asyncio.to_thread(
-            service.save_crew,
-            row,
-            driver=driver or "",
-            workers=[worker.name for worker in workers],
-            telegram_id=user_id,
-        )
-    except Exception:  # noqa: BLE001
-        logger.exception("Не удалось сохранить состав бригады")
-        reply = await message.answer(
-            "Не удалось сохранить состав бригады. Попробуйте позже или обратитесь к координатору.",
-        )
-        await _add_bot_message(state, reply.message_id, message.chat.id)
-        await _show_intro(message, state)
-        await state.set_state(CrewState.WORKERS)
-        return
-
-    from bot.handlers.shift_menu import mark_mode_done, render_shift_menu
-
-    mark_mode_done(user_id, "crew")
+    base_service = service.base_service()
 
     await cleanup_screen(message.bot, message.chat.id, keep_start=False)
-
-    done_message = await message.answer("Состав бригады сохранён ✅")
     await state.clear()
-
-    base_service = getattr(service, "base_service", lambda: service)()
 
     await render_shift_menu(
         message,
@@ -440,179 +319,299 @@ async def _complete_crew(message: types.Message, state: FSMContext) -> None:
         service=base_service,
     )
 
-    if done_message:
-        try:
-            await message.bot.delete_message(message.chat.id, done_message.message_id)
-        except TelegramBadRequest:
-            pass
-        except Exception:  # noqa: BLE001
-            logger.warning("Не удалось удалить итоговое сообщение бригады", exc_info=True)
+
+async def _save_crew(message: types.Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    row = data.get("crew_row")
+    user_id = data.get("crew_user_id")
+    drivers = _deserialize_workers(data.get("crew_drivers"))
+    workers = _deserialize_workers(data.get("crew_workers"))
+    driver_id = data.get("crew_driver_id")
+    selected_ids = data.get("crew_selected_worker_ids", []) or []
+
+    if not isinstance(row, int) or not isinstance(user_id, int):
+        await flash_message(message, "Не удалось определить смену для сохранения.", ttl=2)
+        return
+
+    worker_map = _workers_map(workers)
+    selected_workers = [worker_map.get(w_id) for w_id in selected_ids]
+    selected_workers = [worker for worker in selected_workers if worker is not None]
+    if not selected_workers:
+        await flash_message(message, "Нужно выбрать хотя бы одного рабочего.", ttl=2)
+        await _render_worker_step(message, state)
+        return
+
+    driver = _workers_map(drivers).get(driver_id) if isinstance(driver_id, int) else None
+    driver_name = driver.name if driver else ""
+
+    service = _get_service()
+    try:
+        await asyncio.to_thread(
+            service.save_crew,
+            row,
+            driver=driver_name,
+            workers=[worker.name for worker in selected_workers],
+            telegram_id=user_id,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Не удалось сохранить состав бригады (row=%s, user_id=%s)", row, user_id)
+        await flash_message(message, "Не удалось сохранить состав. Попробуйте позже.", ttl=2.5)
+        return
+
+    await flash_message(message, "💾 Сохраняю…", ttl=2)
+    await flash_message(message, "✅ Состав бригады сохранён", ttl=2)
+    await _return_to_shift_menu(message, state)
 
 
-# Обработчики ----------------------------------------------------------------
+async def _handle_noop(callback: types.CallbackQuery) -> None:
+    await callback.answer()
+
+
+# ---------------------------------------------------------------------------
+# Точки входа и обработчики
 
 
 @router.message(Command("crew"))
-async def start_crew(message: types.Message, state: FSMContext, *, user_id: int | None = None) -> None:
+async def start_crew(
+    message: types.Message,
+    state: FSMContext,
+    *,
+    user_id: int | None = None,
+) -> None:
     await safe_delete(message)
-    await cleanup_screen(message.bot, message.chat.id, keep_start=True)
 
-    actual_user = user_id or (message.from_user.id if message.from_user else None)
-    if actual_user is None:
-        await message.answer("Не удалось определить пользователя. Откройте смену заново.")
+    actual_user_id = await _resolve_user_id(message, state, user_id)
+    if actual_user_id is None:
+        await message.answer("Не удалось определить пользователя. Начните смену заново.")
         await state.clear()
         return
 
     service = _get_service()
-
     try:
-        row = await asyncio.to_thread(service.get_shift_row_index_for_user, actual_user)
+        row = await asyncio.to_thread(service.get_shift_row_index_for_user, actual_user_id)
         if row is None:
-            row = await asyncio.to_thread(service.open_shift_for_user, actual_user)
+            row = await asyncio.to_thread(service.open_shift_for_user, actual_user_id)
+        drivers = await asyncio.to_thread(service.list_active_drivers)
         workers = await asyncio.to_thread(service.list_active_workers)
-        summary = await asyncio.to_thread(service.get_shift_summary, row)
     except Exception:  # noqa: BLE001
-        logger.exception("Не удалось подготовить данные раздела «Бригада»")
-        await message.answer(
-            "Не удалось открыть раздел «Бригада». Попробуйте позже или обратитесь к координатору.",
-        )
+        logger.exception("Не удалось подготовить данные раздела «Бригада» (user_id=%s)", actual_user_id)
+        await message.answer("Не удалось открыть раздел «Бригада». Попробуйте позже.")
         await state.clear()
         return
 
-    crew_info = summary.get("crew") if isinstance(summary, dict) else None
-    driver_name = ""
-    selected_names: list[str] = []
-    if isinstance(crew_info, dict):
-        driver = crew_info.get("driver")
-        if isinstance(driver, str):
-            driver_name = driver.strip()
-        workers_line = crew_info.get("workers")
-        if isinstance(workers_line, list):
-            selected_names = [str(item).strip() for item in workers_line if str(item).strip()]
-        elif isinstance(workers_line, str):
-            pieces = [piece.strip() for piece in workers_line.split(",")]
-            selected_names = [piece for piece in pieces if piece]
-
-    worker_map = {worker.name.casefold(): worker.worker_id for worker in workers}
-    selected_ids = [worker_map[name.casefold()] for name in selected_names if name.casefold() in worker_map]
-
-    context = {
-        "user_id": actual_user,
-        "row": row,
-        "workers": [_serialize_worker(worker) for worker in workers],
-        "selected_worker_ids": selected_ids,
-        "driver": driver_name,
-        "tracker": _make_tracker(),
-        "screen_message_id": None,
-        "workers_message_id": None,
-    }
-    await _save_context(state, context)
+    await state.update_data(
+        crew_user_id=actual_user_id,
+        crew_row=row,
+        crew_drivers=_serialize_workers(drivers),
+        crew_workers=_serialize_workers(workers),
+        crew_driver_id=None,
+        crew_selected_worker_ids=[],
+        crew_screen_id=None,
+        crew_inline_id=None,
+        crew_driver_page=0,
+        crew_worker_page=0,
+    )
 
     await _show_intro(message, state)
-    await _render_workers_list(message, state)
-    await state.set_state(CrewState.WORKERS)
+    await _render_driver_step(message, state)
 
 
-@router.message(CrewState.WORKERS)
-async def handle_workers_menu(message: types.Message, state: FSMContext) -> None:
-    text = (message.text or "").strip()
+# -------------------------- Inline обработчики -----------------------------
 
-    if text == BACK_BUTTON:
-        await _add_user_message(state, message.message_id, message.chat.id)
-        await _return_to_menu(message, state)
+
+@router.callback_query(F.data == NOOP_CALLBACK)
+async def handle_noop(callback: types.CallbackQuery, state: FSMContext) -> None:  # noqa: ARG001
+    await _handle_noop(callback)
+
+
+@router.callback_query(F.data == NAV_HOME_CALLBACK)
+async def handle_nav_home(callback: types.CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if callback.message:
+        await _return_to_shift_menu(callback.message, state)
+
+
+@router.callback_query(F.data == NAV_BACK_CALLBACK)
+async def handle_nav_back(callback: types.CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if callback.message is None:
         return
-    if text == SHIFT_BACK_BUTTON:
-        await _add_user_message(state, message.message_id, message.chat.id)
-        await _go_home(message, state)
-        return
-    if text == CONFIRM_BUTTON:
-        await _add_user_message(state, message.message_id, message.chat.id)
-        await _show_confirm_screen(message, state)
-        await state.set_state(CrewState.CONFIRM)
-        return
-    if text == CLEAR_WORKERS_BUTTON:
-        await _add_user_message(state, message.message_id, message.chat.id)
-        context = await _get_context(state)
-        context["selected_worker_ids"] = []
-        await _save_context(state, context)
-        await _render_workers_list(message, state)
-        await flash_message(message, "Список рабочих очищен", ttl=1.5)
-        return
-    if text == ADD_WORKER_BUTTON:
-        await _add_user_message(state, message.message_id, message.chat.id)
-        await _prompt_worker_selection(message, state)
-        return
-
-    reply = await message.answer("Используйте кнопки на клавиатуре режима.")
-    await _add_user_message(state, message.message_id, message.chat.id)
-    await _add_bot_message(state, reply.message_id, message.chat.id)
-
-
-@router.message(CrewState.AWAIT_WORKER)
-async def handle_worker_number(message: types.Message, state: FSMContext) -> None:
-    await _add_user_message(state, message.message_id, message.chat.id)
-    text = (message.text or "").strip()
-
-    if text == BACK_BUTTON:
-        await _cleanup_step(message, state)
-        await _show_intro(message, state)
-        await state.set_state(CrewState.WORKERS)
-        return
-    if text == SHIFT_BACK_BUTTON:
-        await _cleanup_step(message, state)
-        await _go_home(message, state)
-        return
-
-    try:
-        worker_id = int(text)
-    except ValueError:
-        reply = await message.answer("Введите номер рабочего цифрами.")
-        await _add_bot_message(state, reply.message_id, message.chat.id)
-        return
-
-    await _add_worker_by_id(message, state, worker_id)
-
-
-@router.message(CrewState.CONFIRM)
-async def handle_confirm(message: types.Message, state: FSMContext) -> None:
-    await _add_user_message(state, message.message_id, message.chat.id)
-    text = (message.text or "").strip()
-
-    if text == EDIT_BUTTON:
-        await _cleanup_step(message, state)
-        await _show_intro(message, state)
-        await state.set_state(CrewState.WORKERS)
-        return
-    if text == SHIFT_BACK_BUTTON:
-        await _cleanup_step(message, state)
-        await _go_home(message, state)
-        return
-    if text == CONFIRM_BUTTON:
-        await _cleanup_step(message, state)
-        await _complete_crew(message, state)
-        return
-
-    reply = await message.answer("Используйте кнопки подтверждения.")
-    await _add_bot_message(state, reply.message_id, message.chat.id)
-
-
-@router.callback_query(F.data.startswith(REMOVE_PREFIX))
-async def handle_remove_worker(callback: types.CallbackQuery, state: FSMContext) -> None:
-    payload = callback.data or ""
-    tail = payload[len(REMOVE_PREFIX) :]
-    try:
-        worker_id = int(tail)
-    except ValueError:
-        await callback.answer("не найдено", show_alert=False)
-        return
-
-    message = callback.message
-    if message is None:
-        await callback.answer("не найдено", show_alert=False)
-        return
-
-    removed_name = await _remove_worker(message, state, worker_id)
-    if removed_name:
-        await callback.answer(f"Удалено: {removed_name}")
+    current_state = await state.get_state()
+    if current_state == CrewState.WORKERS.state:
+        await _show_intro(callback.message, state)
+        await _render_driver_step(callback.message, state)
+    elif current_state == CrewState.CONFIRM.state:
+        await _show_intro(callback.message, state)
+        await _render_worker_step(callback.message, state)
     else:
-        await callback.answer("не найдено", show_alert=False)
+        await _show_intro(callback.message, state)
+
+
+@router.callback_query(F.data.startswith(DRIVER_PICK_PREFIX))
+async def handle_driver_pick(callback: types.CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if callback.message is None:
+        return
+    suffix = callback.data[len(DRIVER_PICK_PREFIX) :] if callback.data else ""
+    try:
+        driver_id = int(suffix)
+    except ValueError:
+        await flash_message(callback.message, "Не удалось определить водителя.", ttl=2)
+        return
+
+    data = await state.get_data()
+    drivers = _deserialize_workers(data.get("crew_drivers"))
+    if driver_id not in _workers_map(drivers):
+        await flash_message(callback.message, "Такого водителя нет в списке.", ttl=2)
+        return
+
+    await state.update_data(crew_driver_id=driver_id)
+    await _render_driver_step(callback.message, state)
+
+
+@router.callback_query(F.data.startswith(DRIVER_LIST_PREFIX))
+async def handle_driver_page(callback: types.CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if callback.message is None:
+        return
+    suffix = callback.data[len(DRIVER_LIST_PREFIX) :] if callback.data else "0"
+    try:
+        page = int(suffix)
+    except ValueError:
+        page = 0
+    await _render_driver_step(callback.message, state, page=page)
+
+
+@router.callback_query(F.data == DRIVER_ADD_CALLBACK)
+async def handle_driver_add(callback: types.CallbackQuery, state: FSMContext) -> None:  # noqa: ARG001
+    await callback.answer()
+    if callback.message:
+        await flash_message(callback.message, "Добавление водителя пока недоступно.", ttl=2)
+
+
+@router.callback_query(F.data.startswith(WORKER_LIST_PREFIX))
+async def handle_worker_page(callback: types.CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if callback.message is None:
+        return
+    suffix = callback.data[len(WORKER_LIST_PREFIX) :] if callback.data else "0"
+    try:
+        page = int(suffix)
+    except ValueError:
+        page = 0
+    await _render_worker_step(callback.message, state, page=page)
+
+
+@router.callback_query(F.data.startswith(WORKER_TOGGLE_PREFIX))
+async def handle_worker_toggle(callback: types.CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if callback.message is None:
+        return
+    suffix = callback.data[len(WORKER_TOGGLE_PREFIX) :] if callback.data else ""
+    try:
+        worker_id = int(suffix)
+    except ValueError:
+        await flash_message(callback.message, "Не удалось определить рабочего.", ttl=2)
+        return
+
+    data = await state.get_data()
+    workers = _deserialize_workers(data.get("crew_workers"))
+    workers_map = _workers_map(workers)
+    if worker_id not in workers_map:
+        await flash_message(callback.message, "Рабочий не найден.", ttl=2)
+        return
+
+    selected_ids = list(data.get("crew_selected_worker_ids", []) or [])
+    if worker_id in selected_ids:
+        selected_ids = [wid for wid in selected_ids if wid != worker_id]
+    else:
+        selected_ids.append(worker_id)
+
+    await state.update_data(crew_selected_worker_ids=selected_ids)
+    await _render_worker_step(callback.message, state)
+
+
+@router.callback_query(F.data == WORKER_CLEAR_CALLBACK)
+async def handle_worker_clear(callback: types.CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if callback.message is None:
+        return
+    await state.update_data(crew_selected_worker_ids=[])
+    await _render_worker_step(callback.message, state)
+
+
+@router.callback_query(F.data == WORKER_ADD_CALLBACK)
+async def handle_worker_add(callback: types.CallbackQuery, state: FSMContext) -> None:  # noqa: ARG001
+    await callback.answer()
+    if callback.message:
+        await flash_message(callback.message, "Добавление рабочего пока недоступно.", ttl=2)
+
+
+@router.callback_query(F.data == CONFIRM_CALLBACK)
+async def handle_inline_confirm(callback: types.CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if callback.message is None:
+        return
+    data = await state.get_data()
+    selected_ids = data.get("crew_selected_worker_ids", []) or []
+    if not selected_ids:
+        await flash_message(callback.message, "Нужно выбрать хотя бы одного рабочего.", ttl=2)
+        return
+    await _show_confirm_screen(callback.message, state)
+
+
+# --------------------------- Reply обработчики -----------------------------
+
+
+@router.message(CrewState.CONFIRM, F.text == CONFIRM_BUTTON)
+async def handle_confirm_save(message: types.Message, state: FSMContext) -> None:
+    await _save_crew(message, state)
+
+
+@router.message(CrewState.CONFIRM, F.text == EDIT_BUTTON)
+async def handle_confirm_edit(message: types.Message, state: FSMContext) -> None:
+    await _show_intro(message, state)
+    await _render_worker_step(message, state)
+
+
+@router.message(F.text == ADD_WORKER_BUTTON)
+async def handle_add_worker_button(message: types.Message, state: FSMContext) -> None:
+    await _render_worker_step(message, state)
+
+
+@router.message(F.text == CLEAR_WORKERS_BUTTON)
+async def handle_clear_button(message: types.Message, state: FSMContext) -> None:
+    await state.update_data(crew_selected_worker_ids=[])
+    await _render_worker_step(message, state)
+
+
+@router.message(F.text == CONFIRM_BUTTON)
+async def handle_confirm_button(message: types.Message, state: FSMContext) -> None:
+    current_state = await state.get_state()
+    if current_state == CrewState.CONFIRM.state:
+        await _save_crew(message, state)
+        return
+    data = await state.get_data()
+    selected_ids = data.get("crew_selected_worker_ids", []) or []
+    if not selected_ids:
+        await flash_message(message, "Нужно выбрать хотя бы одного рабочего.", ttl=2)
+        return
+    await _show_confirm_screen(message, state)
+
+
+@router.message(F.text == BACK_BUTTON)
+async def handle_back_button(message: types.Message, state: FSMContext) -> None:
+    current_state = await state.get_state()
+    if current_state == CrewState.WORKERS.state:
+        await _show_intro(message, state)
+        await _render_driver_step(message, state)
+    elif current_state == CrewState.CONFIRM.state:
+        await _show_intro(message, state)
+        await _render_worker_step(message, state)
+    else:
+        await _return_to_shift_menu(message, state)
+
+
+@router.message(F.text == MENU_BUTTON)
+async def handle_menu_button(message: types.Message, state: FSMContext) -> None:
+    await _return_to_shift_menu(message, state)

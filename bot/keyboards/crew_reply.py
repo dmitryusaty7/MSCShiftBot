@@ -1,9 +1,7 @@
-"""Reply-клавиатуры раздела «Бригада» для нового обработчика."""
+"""Reply-клавиатуры для раздела «Бригада» в новом сценарии."""
 
 from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
-
-from bot.keyboards.dashboard import SHIFT_BACK_BUTTON
 
 __all__ = [
     "ADD_WORKER_BUTTON",
@@ -11,6 +9,7 @@ __all__ = [
     "CONFIRM_BUTTON",
     "EDIT_BUTTON",
     "BACK_BUTTON",
+    "MENU_BUTTON",
     "crew_start_keyboard",
     "crew_confirm_keyboard",
 ]
@@ -20,10 +19,11 @@ CLEAR_WORKERS_BUTTON = "🧹 очистить список рабочих"
 CONFIRM_BUTTON = "✅ подтвердить"
 EDIT_BUTTON = "✏️ изменить"
 BACK_BUTTON = "⬅ назад"
+MENU_BUTTON = "🏠 в меню смены"
 
 
 def crew_start_keyboard() -> ReplyKeyboardMarkup:
-    """Стартовая клавиатура раздела со всеми управляющими кнопками."""
+    """Возвращает стартовую клавиатуру режима «Бригада» с основными действиями."""
 
     builder = ReplyKeyboardBuilder()
     builder.row(
@@ -33,7 +33,7 @@ def crew_start_keyboard() -> ReplyKeyboardMarkup:
     builder.row(KeyboardButton(text=CONFIRM_BUTTON))
     builder.row(
         KeyboardButton(text=BACK_BUTTON),
-        KeyboardButton(text=SHIFT_BACK_BUTTON),
+        KeyboardButton(text=MENU_BUTTON),
     )
     return builder.as_markup(resize_keyboard=True)
 
