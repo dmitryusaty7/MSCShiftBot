@@ -16,6 +16,7 @@ from bot.handlers.expenses import router as expenses_router
 from bot.handlers.materials import router as materials_router
 from bot.handlers.registration import router as registration_router
 from bot.handlers.crew import router as crew_router
+from bot.handlers.shift_close import router as shift_close_router
 from bot.handlers.shift_menu import router as shift_menu_router
 from services.env import require_env
 
@@ -34,6 +35,7 @@ def main() -> None:
     dispatcher.include_router(materials_router)
     dispatcher.include_router(crew_router)
     dispatcher.include_router(shift_menu_router)
+    dispatcher.include_router(shift_close_router)
     dispatcher.run_polling(bot)
 
 

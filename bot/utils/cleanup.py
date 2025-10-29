@@ -13,8 +13,11 @@ from typing import Iterable, List
 from aiogram import types
 from aiogram.exceptions import TelegramBadRequest
 
+from aiogram.fsm.context import FSMContext
+
 __all__ = [
     "cleanup_screen",
+    "cleanup_after_confirm",
     "remember_message",
     "remember_messages",
     "reset_history",
@@ -99,3 +102,39 @@ async def send_screen_message(
     )
     remember_message(message.chat.id, screen.message_id)
     return screen
+
+
+async def cleanup_after_confirm(
+    message: types.Message,
+    state: FSMContext | None = None,
+    *,
+    keep_start: bool = False,
+) -> None:
+    """Очищает ленту чата после подтверждения закрытия смены."""
+
+    bot = message.bot
+    chat_id = message.chat.id
+
+    if state is not None:
+        try:
+            data = await state.get_data()
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Не удалось получить данные состояния для очистки (chat_id=%s)",
+                chat_id,
+                exc_info=True,
+            )
+            data = {}
+        menu_id = data.get("shift_menu_message_id") if isinstance(data, dict) else None
+        if isinstance(menu_id, int) and menu_id > 0:
+            try:
+                await bot.delete_message(chat_id, menu_id)
+            except TelegramBadRequest:
+                logger.debug("Сообщение меню уже удалено: %s", menu_id)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "Не удалось удалить сообщение меню %s", menu_id, exc_info=True
+                )
+            await state.update_data(shift_menu_message_id=None)
+
+    await cleanup_screen(bot, chat_id, keep_start=keep_start)
