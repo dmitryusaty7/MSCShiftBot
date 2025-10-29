@@ -63,6 +63,7 @@ EXP_COL_CLOSED_AT = "L"
 MATERIALS_COL_TG = "B"
 MATERIALS_COL_FIO = "E"
 
+MAT_COL_PVD_INCOMING = "E"
 MAT_COL_PVD_M = "H"
 MAT_COL_PVC_PCS = "I"
 MAT_COL_TAPE_PCS = "J"
@@ -89,6 +90,60 @@ MATERIALS_USER_COLS = ["A"] + [
 CREW_USER_COLS = [CREW_COL_TG, CREW_COL_DRIVER, CREW_COL_BRIGADIER, CREW_COL_WORKERS]
 
 T = TypeVar("T")
+
+
+def _build_materials_updates(
+    *,
+    worksheet_title: str,
+    row: int,
+    pvd_income: Any,
+    pvd_m: int | None,
+    pvc_pcs: int | None,
+    tape_pcs: int | None,
+    folder_link: str | None,
+) -> list[dict[str, object]]:
+    """Формирует пакет обновлений для листа «Материалы».
+
+    Пустые строки и ``None`` игнорируются, чтобы не затирать существующие
+    значения. Значение колонки поступления рулонов ПВД (E) передаётся только
+    если оно непустое.
+    """
+
+    def normalize(value: Any) -> Any | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            trimmed = value.strip()
+            if not trimmed:
+                return None
+            return trimmed
+        return value
+
+    updates: list[dict[str, object]] = []
+
+    income_value = normalize(pvd_income)
+    if income_value is not None:
+        updates.append(
+            {
+                "range": f"{worksheet_title}!{MAT_COL_PVD_INCOMING}{row}",
+                "values": [[income_value]],
+            }
+        )
+
+    def put(column: str, value: Any | None) -> None:
+        candidate = normalize(value)
+        if candidate is None:
+            return
+        updates.append(
+            {"range": f"{worksheet_title}!{column}{row}", "values": [[candidate]]}
+        )
+
+    put(MAT_COL_PVD_M, pvd_m)
+    put(MAT_COL_PVC_PCS, pvc_pcs)
+    put(MAT_COL_TAPE_PCS, tape_pcs)
+    put(MAT_COL_FOLDER_LINK, folder_link)
+
+    return updates
 
 
 @dataclass
@@ -771,39 +826,46 @@ class SheetsService:
         row: int,
         spreadsheet_id: Optional[str] = None,
         *,
+        pvd_income_m: int | str | None = None,
         pvd_m: int | None = None,
         pvc_pcs: int | None = None,
         tape_pcs: int | None = None,
         folder_link: str | None = None,
     ) -> None:
-        """Сохраняет блок материалов для строки смены."""
+        """Сохраняет блок материалов для строки смены.
+
+        Метод обновляет только переданные значения и бережно относится к колонке
+        ``Материалы!E``: если новое значение не передано, сохраняется текущее
+        содержимое ячейки, чтобы избежать затирания поступлений рулонов ПВД.
+        """
 
         ws = self._get_worksheet(SHEET_MATERIALS, spreadsheet_id)
-        updates: list[dict[str, object]] = []
 
-        def put(column: str, value: Any) -> None:
-            if value is not None:
-                updates.append(
-                    {
-                        "range": f"{ws.title}!{column}{row}",
-                        "values": [[value]],
-                    }
-                )
+        if pvd_income_m is None:
+            def fetch_income() -> Any:
+                cell = ws.acell(f"{MAT_COL_PVD_INCOMING}{row}")
+                return getattr(cell, "value", None)
 
-        put(MAT_COL_PVD_M, pvd_m)
-        put(MAT_COL_PVC_PCS, pvc_pcs)
-        put(MAT_COL_TAPE_PCS, tape_pcs)
-        put(MAT_COL_FOLDER_LINK, folder_link)
+            existing_income = retry(fetch_income)
+        else:
+            existing_income = pvd_income_m
+
+        updates = _build_materials_updates(
+            worksheet_title=ws.title,
+            row=row,
+            pvd_income=existing_income,
+            pvd_m=pvd_m,
+            pvc_pcs=pvc_pcs,
+            tape_pcs=tape_pcs,
+            folder_link=folder_link,
+        )
 
         if not updates:
             return
 
         spreadsheet = self._get_spreadsheet(spreadsheet_id)
-        retry(
-            lambda: spreadsheet.values_batch_update(
-                {"valueInputOption": "USER_ENTERED", "data": updates}
-            )
-        )
+        payload = {"valueInputOption": "USER_ENTERED", "data": updates}
+        retry(lambda: spreadsheet.values_batch_update(payload))
 
     def _list_directory_records(
         self,
