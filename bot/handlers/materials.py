@@ -26,7 +26,7 @@ from bot.keyboards.materials import (
     materials_remove_keyboard,
     materials_start_keyboard,
 )
-from bot.utils.cleanup import cleanup_screen, remember_message
+from bot.utils.cleanup import cleanup_screen, remember_message, send_screen_message
 from bot.utils.flash import flash_message
 from bot.validators.number import parse_amount
 from features.utils.messaging import safe_delete
@@ -278,11 +278,16 @@ async def start_materials(
         return
 
     intro_lines = [
-        "📦 Раздел «Материалы»",
-        "Фиксируем расход расходников и добавляем фото крепления. Нажмите кнопку ниже, чтобы начать ввод.",
+        "📦 Материалы — ввод данных",
+        "",
+        "Заполняем расход плёнки ПВД, трубок ПВХ и клейкой ленты по текущей смене.",
+        "При необходимости прикрепите фото чеков или крепления перед подтверждением.",
     ]
-    prompt = await message.answer("\n".join(intro_lines), reply_markup=materials_start_keyboard())
-    remember_message(message.chat.id, prompt.message_id)
+    prompt = await send_screen_message(
+        message,
+        "\n".join(intro_lines),
+        reply_markup=materials_start_keyboard(),
+    )
 
     context = {
         "user_id": actual_user_id,
@@ -637,13 +642,16 @@ async def handle_confirm(message: types.Message, state: FSMContext) -> None:
         return
 
     mark_mode_done(user_id, "materials")
+
+    await cleanup_screen(message.bot, message.chat.id, keep_start=False)
+
     done_message = await message.answer(
-        "раздел «материалы» сохранён ✅",
+        "Раздел «материалы» сохранён ✅",
         reply_markup=materials_remove_keyboard(),
     )
 
-    await cleanup_screen(message.bot, message.chat.id, keep_start=False)
     await state.update_data(materials_ctx=None)
+    await state.set_state(None)
 
     await render_shift_menu(
         message,
@@ -653,6 +661,7 @@ async def handle_confirm(message: types.Message, state: FSMContext) -> None:
         service=_get_service(),
         delete_trigger_message=False,
         show_progress=False,
+        use_screen_message=True,
     )
 
     if done_message:

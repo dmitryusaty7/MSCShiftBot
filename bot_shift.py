@@ -11,12 +11,12 @@ from pathlib import Path
 from aiogram import Bot, Dispatcher
 from dotenv import load_dotenv
 
+from bot.handlers.dashboard import router as dashboard_router
+from bot.handlers.expenses import router as expenses_router
+from bot.handlers.materials import router as materials_router
 from bot.handlers.registration import router as registration_router
-from features.crew import router as crew_router
-from features.expenses import router as expenses_router
-from features.materials import router as materials_router
-from features.main_menu import router as main_menu_router
-from features.shift_menu import router as shift_menu_router
+from bot.handlers.crew import router as crew_router
+from bot.handlers.shift_menu import router as shift_menu_router
 from services.env import require_env
 
 
@@ -29,7 +29,7 @@ def main() -> None:
     bot = Bot(token=require_env("BOT_TOKEN"))
     dispatcher = Dispatcher()
     dispatcher.include_router(registration_router)
-    dispatcher.include_router(main_menu_router)
+    dispatcher.include_router(dashboard_router)
     dispatcher.include_router(expenses_router)
     dispatcher.include_router(materials_router)
     dispatcher.include_router(crew_router)

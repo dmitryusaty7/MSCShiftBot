@@ -23,7 +23,10 @@ from bot.keyboards.auth import (
 )
 from bot.utils.flash import flash_message
 from bot.validators.name import validate_name
-from features.main_menu import show_menu
+from bot.handlers.dashboard import show_dashboard
+
+# Совместимый псевдоним для существующих тестов и обработчиков.
+show_menu = show_dashboard
 from services.env import require_env
 from services.sheets import SheetsService
 
