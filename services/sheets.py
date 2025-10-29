@@ -604,8 +604,6 @@ class SheetsService:
         profile = self.get_user_profile(telegram_id, sid)
 
         today_value = today_date.isoformat()
-        materials_fio_col = getattr(self, "MATERIALS_COL_FIO", MATERIALS_COL_FIO)
-
         batch = [
             {
                 "range": f"{SHEET_EXPENSES}!{EXPENSES_COL_DATE}{target_row}",
@@ -628,10 +626,6 @@ class SheetsService:
         if existing_row is None:
             batch.extend(
                 [
-                    {
-                        "range": f"{SHEET_MATERIALS}!{materials_fio_col}{target_row}",
-                        "values": [[""]],
-                    },
                     {
                         "range": f"{SHEET_CREW}!{CREW_COL_DRIVER}{target_row}",
                         "values": [[""]],
