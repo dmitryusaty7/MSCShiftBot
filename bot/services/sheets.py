@@ -43,6 +43,19 @@ class CrewSheetsService:
         names = self._base.list_active_workers()
         return [CrewWorker(worker_id=index + 1, name=name) for index, name in enumerate(names)]
 
+    # Добавление сотрудников -------------------------------------------------
+    def add_driver(self, name: str) -> None:
+        self._base.add_driver(name)
+
+    def add_worker(self, name: str) -> None:
+        self._base.add_worker(name)
+
+    def get_driver_status(self, name: str) -> str | None:
+        return self._base.get_driver_status(name)
+
+    def get_worker_status(self, name: str) -> str | None:
+        return self._base.get_worker_status(name)
+
     # Сохранение состава -------------------------------------------------
     def save_crew(
         self,

@@ -4,14 +4,19 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from aiogram.types import InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from bot.services import CrewWorker
 
-__all__ = ["WORKER_TOGGLE_PREFIX", "make_workers_inline_summary"]
+__all__ = [
+    "WORKER_TOGGLE_PREFIX",
+    "WORKERS_CONFIRM_CALLBACK",
+    "make_workers_inline_summary",
+]
 
 WORKER_TOGGLE_PREFIX = "crew:wrk:toggle:"
+WORKERS_CONFIRM_CALLBACK = "crew:wrk:confirm"
 
 
 def make_workers_inline_summary(
@@ -43,6 +48,9 @@ def make_workers_inline_summary(
                 callback_data=f"{WORKER_TOGGLE_PREFIX}{worker.worker_id}",
             )
         builder.adjust(2)
+        builder.row(
+            InlineKeyboardButton(text="✅ подтвердить", callback_data=WORKERS_CONFIRM_CALLBACK)
+        )
         markup: InlineKeyboardMarkup | None = builder.as_markup()
     else:
         markup = None

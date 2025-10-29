@@ -11,22 +11,31 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from bot.keyboards.crew_inline import WORKER_TOGGLE_PREFIX, make_workers_inline_summary
+from bot.keyboards.crew_inline import (
+    WORKER_TOGGLE_PREFIX,
+    WORKERS_CONFIRM_CALLBACK,
+    make_workers_inline_summary,
+)
 from bot.keyboards.crew_reply import (
     ADD_DRIVER_BUTTON,
+    ADD_WORKER_BUTTON,
     BACK_BUTTON,
     CLEAR_WORKERS_BUTTON,
     CONFIRM_BUTTON,
     EDIT_BUTTON,
     MENU_BUTTON,
-    NEXT_BUTTON,
     START_BUTTON,
     make_confirmation_kb,
     make_driver_kb,
     make_intro_kb,
     make_workers_kb,
 )
-from bot.services import CrewSheetsService, CrewWorker
+from bot.services import (
+    CrewSheetsService,
+    CrewWorker,
+    format_compact_fio,
+    validate_name_piece,
+)
 from bot.utils.cleanup import remember_message, send_screen_message
 from bot.utils.flash import flash_message
 from bot.utils.textnorm import norm_text
@@ -41,6 +50,22 @@ class CrewState(StatesGroup):
     INTRO = State()
     DRIVER = State()
     WORKERS = State()
+
+
+class CrewAddDriverState(StatesGroup):
+    """Промежуточные шаги добавления нового водителя."""
+
+    LAST = State()
+    FIRST = State()
+    MIDDLE = State()
+
+
+class CrewAddWorkerState(StatesGroup):
+    """Промежуточные шаги добавления нового рабочего."""
+
+    LAST = State()
+    FIRST = State()
+    MIDDLE = State()
 
 
 _service: CrewSheetsService | None = None
@@ -167,6 +192,210 @@ def _selected_ids(data: dict[str, Any]) -> list[int]:
         elif isinstance(value, str) and value.isdigit():
             selected.append(int(value))
     return selected
+
+
+def _should_skip_middle(text: str | None) -> bool:
+    normalized = _norm(text)
+    return normalized in {"", "-", "—", "нет"}
+
+
+async def _refresh_driver_directory(state: FSMContext) -> list[CrewWorker]:
+    service = _get_service()
+    drivers = await asyncio.to_thread(service.list_active_drivers)
+    await state.update_data(crew_drivers=_serialize_workers(drivers))
+    return drivers
+
+
+async def _refresh_worker_directory(state: FSMContext) -> list[CrewWorker]:
+    service = _get_service()
+    workers = await asyncio.to_thread(service.list_active_workers)
+    await state.update_data(crew_workers=_serialize_workers(workers))
+    return workers
+
+
+async def _ask_driver_last(message: types.Message, state: FSMContext) -> None:
+    await show_screen(
+        message,
+        state,
+        text="Введите фамилию нового водителя:",
+        reply_markup=types.ReplyKeyboardRemove(),
+    )
+
+
+async def _ask_driver_first(message: types.Message, state: FSMContext) -> None:
+    await show_screen(
+        message,
+        state,
+        text="Введите имя нового водителя:",
+        reply_markup=types.ReplyKeyboardRemove(),
+    )
+
+
+async def _ask_driver_middle(message: types.Message, state: FSMContext) -> None:
+    await show_screen(
+        message,
+        state,
+        text="Введите отчество (если нет, оставьте пустым или отправьте «-»):",
+        reply_markup=types.ReplyKeyboardRemove(),
+    )
+
+
+async def _start_add_driver(message: types.Message, state: FSMContext) -> None:
+    await state.update_data(
+        crew_add_driver_last=None,
+        crew_add_driver_first=None,
+        crew_add_driver_middle=None,
+    )
+    await state.set_state(CrewAddDriverState.LAST)
+    await _ask_driver_last(message, state)
+
+
+async def _finalize_driver_addition(message: types.Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    last = data.get("crew_add_driver_last")
+    first = data.get("crew_add_driver_first")
+    middle = data.get("crew_add_driver_middle") or ""
+
+    if not isinstance(last, str) or not isinstance(first, str):
+        await flash_message(message, "Не удалось прочитать введённые данные. Повторите ввод.")
+        await _enter_driver_step(message, state)
+        return
+
+    full_name = format_compact_fio(last, first, middle if isinstance(middle, str) else "")
+    service = _get_service()
+
+    try:
+        status = await asyncio.to_thread(service.get_driver_status, full_name)
+    except Exception:  # noqa: BLE001
+        logger.exception("Не удалось проверить наличие водителя %s", full_name)
+        await flash_message(message, "Ошибка при проверке справочника. Попробуйте позже.")
+        await _enter_driver_step(message, state)
+        return
+
+    if status is not None:
+        if status.strip().lower() == "архив":
+            await flash_message(
+                message,
+                "Водитель найден в архиве. Обратитесь к координатору для восстановления записи.",
+                ttl=3.0,
+            )
+        else:
+            await flash_message(message, "Такой водитель уже есть в списке.")
+        await _enter_driver_step(message, state)
+        return
+
+    try:
+        await asyncio.to_thread(service.add_driver, full_name)
+    except Exception:  # noqa: BLE001
+        logger.exception("Не удалось добавить водителя %s", full_name)
+        await flash_message(message, "Не удалось добавить водителя. Попробуйте позже.")
+        await _enter_driver_step(message, state)
+        return
+
+    drivers = await _refresh_driver_directory(state)
+    driver = next((item for item in drivers if item.name == full_name), None)
+    await state.update_data(
+        crew_driver_id=driver.worker_id if isinstance(driver, CrewWorker) else None,
+        crew_driver_name=driver.name if isinstance(driver, CrewWorker) else full_name,
+    )
+
+    await flash_message(message, f"✔ водитель добавлен: {full_name}")
+    await _enter_workers_step(message, state)
+
+
+async def _ask_worker_last(message: types.Message, state: FSMContext) -> None:
+    await show_screen(
+        message,
+        state,
+        text="Введите фамилию рабочего:",
+        reply_markup=types.ReplyKeyboardRemove(),
+    )
+
+
+async def _ask_worker_first(message: types.Message, state: FSMContext) -> None:
+    await show_screen(
+        message,
+        state,
+        text="Введите имя рабочего:",
+        reply_markup=types.ReplyKeyboardRemove(),
+    )
+
+
+async def _ask_worker_middle(message: types.Message, state: FSMContext) -> None:
+    await show_screen(
+        message,
+        state,
+        text="Введите отчество (если нет, оставьте пустым или отправьте «-»):",
+        reply_markup=types.ReplyKeyboardRemove(),
+    )
+
+
+async def _start_add_worker(message: types.Message, state: FSMContext) -> None:
+    await state.update_data(
+        crew_add_worker_last=None,
+        crew_add_worker_first=None,
+        crew_add_worker_middle=None,
+    )
+    await state.set_state(CrewAddWorkerState.LAST)
+    await _ask_worker_last(message, state)
+
+
+async def _finalize_worker_addition(message: types.Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    last = data.get("crew_add_worker_last")
+    first = data.get("crew_add_worker_first")
+    middle = data.get("crew_add_worker_middle") or ""
+
+    if not isinstance(last, str) or not isinstance(first, str):
+        await flash_message(message, "Не удалось прочитать данные рабочего. Повторите ввод.")
+        await _enter_workers_step(message, state)
+        return
+
+    full_name = format_compact_fio(last, first, middle if isinstance(middle, str) else "")
+    service = _get_service()
+
+    try:
+        status = await asyncio.to_thread(service.get_worker_status, full_name)
+    except Exception:  # noqa: BLE001
+        logger.exception("Не удалось проверить наличие рабочего %s", full_name)
+        await flash_message(message, "Ошибка при проверке справочника. Попробуйте позже.")
+        await _enter_workers_step(message, state)
+        return
+
+    if status is not None:
+        if status.strip().lower() == "архив":
+            await flash_message(
+                message,
+                "Рабочий числится в архиве. Обратитесь к координатору для восстановления записи.",
+                ttl=3.0,
+            )
+        else:
+            await flash_message(message, "Такой рабочий уже есть в списке.")
+        await _enter_workers_step(message, state)
+        return
+
+    try:
+        await asyncio.to_thread(service.add_worker, full_name)
+    except Exception:  # noqa: BLE001
+        logger.exception("Не удалось добавить рабочего %s", full_name)
+        await flash_message(message, "Не удалось добавить рабочего. Попробуйте позже.")
+        await _enter_workers_step(message, state)
+        return
+
+    workers = await _refresh_worker_directory(state)
+    selected_set = set(_selected_ids(data))
+    new_worker = next((item for item in workers if item.name == full_name), None)
+    if isinstance(new_worker, CrewWorker):
+        selected_set.add(new_worker.worker_id)
+
+    ordered_workers = [worker for worker in workers if worker.worker_id in selected_set]
+    await state.update_data(
+        crew_selected_worker_ids=[worker.worker_id for worker in ordered_workers],
+        crew_selected_worker_names=[worker.name for worker in ordered_workers],
+    )
+
+    await flash_message(message, f"✔ рабочий добавлен: {full_name}")
+    await _enter_workers_step(message, state)
 
 
 async def render_workers_inline_list(message: types.Message, state: FSMContext) -> None:
@@ -493,17 +722,7 @@ async def handle_driver_step(message: types.Message, state: FSMContext) -> None:
         await _enter_intro(message, state)
         return
     if text_norm == _norm(ADD_DRIVER_BUTTON):
-        await flash_message(message, "Добавление водителя пока недоступно.")
-        await _enter_driver_step(message, state)
-        return
-    if text_norm == _norm(NEXT_BUTTON):
-        data = await state.get_data()
-        driver_id = data.get("crew_driver_id")
-        if isinstance(driver_id, int):
-            await _enter_workers_step(message, state)
-        else:
-            await flash_message(message, "Сначала выберите водителя.")
-            await _enter_driver_step(message, state)
+        await _start_add_driver(message, state)
         return
 
     data = await state.get_data()
@@ -518,7 +737,83 @@ async def handle_driver_step(message: types.Message, state: FSMContext) -> None:
     driver_name = next((item.name for item in drivers if item.worker_id == choice), str(choice))
     await state.update_data(crew_driver_id=choice, crew_driver_name=driver_name)
     await flash_message(message, f"✔ водитель выбран: {driver_name}")
-    await _enter_driver_step(message, state)
+    await _enter_workers_step(message, state)
+
+
+@router.message(CrewAddDriverState.LAST)
+async def handle_add_driver_last(message: types.Message, state: FSMContext) -> None:
+    text = message.text or ""
+    text_norm = _norm(text)
+
+    if text_norm == _norm(MENU_BUTTON):
+        await _return_to_menu(message, state)
+        return
+    if text_norm == _norm(BACK_BUTTON):
+        await _enter_driver_step(message, state)
+        return
+
+    try:
+        last = validate_name_piece(text)
+    except ValueError as error:
+        await flash_message(message, f"Фамилия: {error}")
+        await _ask_driver_last(message, state)
+        return
+
+    await state.update_data(crew_add_driver_last=last)
+    await state.set_state(CrewAddDriverState.FIRST)
+    await _ask_driver_first(message, state)
+
+
+@router.message(CrewAddDriverState.FIRST)
+async def handle_add_driver_first(message: types.Message, state: FSMContext) -> None:
+    text = message.text or ""
+    text_norm = _norm(text)
+
+    if text_norm == _norm(MENU_BUTTON):
+        await _return_to_menu(message, state)
+        return
+    if text_norm == _norm(BACK_BUTTON):
+        await state.set_state(CrewAddDriverState.LAST)
+        await _ask_driver_last(message, state)
+        return
+
+    try:
+        first = validate_name_piece(text)
+    except ValueError as error:
+        await flash_message(message, f"Имя: {error}")
+        await _ask_driver_first(message, state)
+        return
+
+    await state.update_data(crew_add_driver_first=first)
+    await state.set_state(CrewAddDriverState.MIDDLE)
+    await _ask_driver_middle(message, state)
+
+
+@router.message(CrewAddDriverState.MIDDLE)
+async def handle_add_driver_middle(message: types.Message, state: FSMContext) -> None:
+    text = message.text or ""
+    text_norm = _norm(text)
+
+    if text_norm == _norm(MENU_BUTTON):
+        await _return_to_menu(message, state)
+        return
+    if text_norm == _norm(BACK_BUTTON):
+        await state.set_state(CrewAddDriverState.FIRST)
+        await _ask_driver_first(message, state)
+        return
+
+    if _should_skip_middle(text):
+        middle = ""
+    else:
+        try:
+            middle = validate_name_piece(text)
+        except ValueError as error:
+            await flash_message(message, f"Отчество: {error}")
+            await _ask_driver_middle(message, state)
+            return
+
+    await state.update_data(crew_add_driver_middle=middle)
+    await _finalize_driver_addition(message, state)
 
 
 @router.message(CrewState.WORKERS)
@@ -541,6 +836,9 @@ async def handle_workers_step(message: types.Message, state: FSMContext) -> None
         await state.update_data(crew_confirmation_pending=False)
         await _enter_driver_step(message, state)
         return
+    if text_norm == _norm(ADD_WORKER_BUTTON):
+        await _start_add_worker(message, state)
+        return
     if text_norm == _norm(CLEAR_WORKERS_BUTTON):
         await state.update_data(
             crew_selected_worker_ids=[],
@@ -552,20 +850,6 @@ async def handle_workers_step(message: types.Message, state: FSMContext) -> None
         return
 
     data = await state.get_data()
-    confirmation_pending = bool(data.get("crew_confirmation_pending"))
-
-    if confirmation_pending:
-        if text_norm == _norm(CONFIRM_BUTTON):
-            await _save_and_finish(message, state)
-            return
-        if text_norm == _norm(EDIT_BUTTON):
-            await state.update_data(crew_confirmation_pending=False)
-            await _enter_workers_step(message, state)
-            return
-
-    if text_norm == _norm(CONFIRM_BUTTON):
-        await _show_confirmation(message, state)
-        return
 
     mapping: dict[str, int] = data.get("crew_map_buttons", {})
     choice = _resolve_choice(mapping, text)
@@ -579,19 +863,96 @@ async def handle_workers_step(message: types.Message, state: FSMContext) -> None
     worker_name = next((item.name for item in workers if item.worker_id == choice), str(choice))
 
     if choice in selected_set:
-        await state.update_data(crew_confirmation_pending=False)
-        await _enter_workers_step(message, state)
-        return
+        selected_set.remove(choice)
+        tip = f"✖ удалён {worker_name}"
+    else:
+        selected_set.add(choice)
+        tip = f"✔ добавлен {worker_name}"
 
-    selected_set.add(choice)
     ordered_workers = [worker for worker in workers if worker.worker_id in selected_set]
     await state.update_data(
         crew_selected_worker_ids=[worker.worker_id for worker in ordered_workers],
         crew_selected_worker_names=[worker.name for worker in ordered_workers],
         crew_confirmation_pending=False,
     )
-    await flash_message(message, f"✔ добавлен {worker_name}")
+    await flash_message(message, tip)
     await _enter_workers_step(message, state)
+
+
+@router.message(CrewAddWorkerState.LAST)
+async def handle_add_worker_last(message: types.Message, state: FSMContext) -> None:
+    text = message.text or ""
+    text_norm = _norm(text)
+
+    if text_norm == _norm(MENU_BUTTON):
+        await _return_to_menu(message, state)
+        return
+    if text_norm == _norm(BACK_BUTTON):
+        await _enter_workers_step(message, state)
+        return
+
+    try:
+        last = validate_name_piece(text)
+    except ValueError as error:
+        await flash_message(message, f"Фамилия: {error}")
+        await _ask_worker_last(message, state)
+        return
+
+    await state.update_data(crew_add_worker_last=last)
+    await state.set_state(CrewAddWorkerState.FIRST)
+    await _ask_worker_first(message, state)
+
+
+@router.message(CrewAddWorkerState.FIRST)
+async def handle_add_worker_first(message: types.Message, state: FSMContext) -> None:
+    text = message.text or ""
+    text_norm = _norm(text)
+
+    if text_norm == _norm(MENU_BUTTON):
+        await _return_to_menu(message, state)
+        return
+    if text_norm == _norm(BACK_BUTTON):
+        await state.set_state(CrewAddWorkerState.LAST)
+        await _ask_worker_last(message, state)
+        return
+
+    try:
+        first = validate_name_piece(text)
+    except ValueError as error:
+        await flash_message(message, f"Имя: {error}")
+        await _ask_worker_first(message, state)
+        return
+
+    await state.update_data(crew_add_worker_first=first)
+    await state.set_state(CrewAddWorkerState.MIDDLE)
+    await _ask_worker_middle(message, state)
+
+
+@router.message(CrewAddWorkerState.MIDDLE)
+async def handle_add_worker_middle(message: types.Message, state: FSMContext) -> None:
+    text = message.text or ""
+    text_norm = _norm(text)
+
+    if text_norm == _norm(MENU_BUTTON):
+        await _return_to_menu(message, state)
+        return
+    if text_norm == _norm(BACK_BUTTON):
+        await state.set_state(CrewAddWorkerState.FIRST)
+        await _ask_worker_first(message, state)
+        return
+
+    if _should_skip_middle(text):
+        middle = ""
+    else:
+        try:
+            middle = validate_name_piece(text)
+        except ValueError as error:
+            await flash_message(message, f"Отчество: {error}")
+            await _ask_worker_middle(message, state)
+            return
+
+    await state.update_data(crew_add_worker_middle=middle)
+    await _finalize_worker_addition(message, state)
 
 
 @router.callback_query(F.data.startswith(WORKER_TOGGLE_PREFIX))
@@ -630,6 +991,17 @@ async def handle_workers_inline(callback: types.CallbackQuery, state: FSMContext
     await callback.answer()
     await flash_message(callback, f"✖ удалён {worker_name}", ttl=1.0)
     await _enter_workers_step(message, state)
+
+
+@router.callback_query(F.data == WORKERS_CONFIRM_CALLBACK)
+async def handle_workers_confirm(callback: types.CallbackQuery, state: FSMContext) -> None:
+    message = callback.message
+    if message is None:
+        await callback.answer()
+        return
+
+    await callback.answer()
+    await _save_and_finish(message, state)
 
 
 # ---------------------------------------------------------------------------

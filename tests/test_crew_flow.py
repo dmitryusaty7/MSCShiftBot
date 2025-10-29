@@ -13,17 +13,22 @@ from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
 from bot.handlers import crew, shift_menu
 from bot.handlers.crew import CrewState
 from bot.keyboards.crew_reply import (
+    ADD_DRIVER_BUTTON,
+    ADD_WORKER_BUTTON,
     CONFIRM_BUTTON,
     EDIT_BUTTON,
     MENU_BUTTON,
-    NEXT_BUTTON,
     START_BUTTON,
     make_confirmation_kb,
     make_driver_kb,
     make_intro_kb,
     make_workers_kb,
 )
-from bot.keyboards.crew_inline import WORKER_TOGGLE_PREFIX, make_workers_inline_summary
+from bot.keyboards.crew_inline import (
+    WORKER_TOGGLE_PREFIX,
+    WORKERS_CONFIRM_CALLBACK,
+    make_workers_inline_summary,
+)
 from bot.services import CrewWorker
 from bot.utils.cleanup import reset_history
 from bot.utils.textnorm import norm_text
@@ -55,7 +60,9 @@ def test_driver_keyboard_returns_mapping() -> None:
     markup, mapping = make_driver_kb(drivers, driver_id=2)
     texts = _flatten(markup)
     assert any(text.startswith("✔") for text in texts)
-    assert NEXT_BUTTON in texts
+    assert ADD_DRIVER_BUTTON in texts
+    assert MENU_BUTTON in texts
+    assert all(text != "➡ далее" for text in texts)
     assert mapping
     assert mapping[next(iter(mapping))] == 1
 
@@ -64,11 +71,12 @@ def test_workers_keyboard_shows_confirm_only_with_selection() -> None:
     workers = [CrewWorker(worker_id=i, name=f"Рабочий {i}") for i in range(1, 4)]
     markup_empty, _ = make_workers_kb(workers, [])
     texts_empty = _flatten(markup_empty)
+    assert ADD_WORKER_BUTTON in texts_empty
     assert CONFIRM_BUTTON not in texts_empty
 
     markup_full, _ = make_workers_kb(workers, [1, 3])
     texts_full = _flatten(markup_full)
-    assert CONFIRM_BUTTON in texts_full
+    assert CONFIRM_BUTTON not in texts_full
 
 
 def test_confirmation_keyboard_contains_expected_buttons() -> None:
@@ -89,14 +97,12 @@ def test_inline_summary_contains_toggle_buttons() -> None:
     assert "Рабочий А" in text
     assert markup is not None
 
-    buttons = [
-        button
-        for row in markup.inline_keyboard
-        for button in row
-    ]
+    buttons = [button for row in markup.inline_keyboard for button in row]
 
-    assert all(button.callback_data.startswith(WORKER_TOGGLE_PREFIX) for button in buttons)
-    assert any(button.text.startswith("✖") for button in buttons)
+    assert any(button.callback_data == WORKERS_CONFIRM_CALLBACK for button in buttons)
+    toggle_buttons = [button for button in buttons if button.callback_data.startswith(WORKER_TOGGLE_PREFIX)]
+    assert toggle_buttons
+    assert any(button.text.startswith("✖") for button in toggle_buttons)
 
     _, empty_markup = make_workers_inline_summary(driver, [])
     assert empty_markup is None
@@ -120,6 +126,24 @@ class StubCrewService:
 
     def list_active_workers(self) -> list[CrewWorker]:
         return list(self.workers)
+
+    def get_driver_status(self, name: str) -> str | None:
+        for worker in self.drivers:
+            if worker.name.casefold() == name.casefold():
+                return "Активен"
+        return None
+
+    def get_worker_status(self, name: str) -> str | None:
+        for worker in self.workers:
+            if worker.name.casefold() == name.casefold():
+                return "Актив"
+        return None
+
+    def add_driver(self, name: str) -> None:
+        self.drivers.append(CrewWorker(worker_id=len(self.drivers) + 1, name=name))
+
+    def add_worker(self, name: str) -> None:
+        self.workers.append(CrewWorker(worker_id=len(self.workers) + 1, name=name))
 
     def save_crew(self, row: int, *, driver: str, workers: list[str], telegram_id: int | None = None) -> None:
         self.saved_calls.append(
@@ -306,15 +330,6 @@ async def _run_flow(monkeypatch) -> tuple[StubCrewService, StubBot]:
         await crew.handle_driver_step(driver_message, state)
         data = await state.get_data()
         assert data.get("crew_driver_id") == 1
-
-        next_message = DummyMessage(
-            bot=bot,
-            chat_id=chat_id,
-            user_id=user_id,
-            message_id=bot.allocate_id(),
-            text=NEXT_BUTTON,
-        )
-        await crew.handle_driver_step(next_message, state)
         assert await state.get_state() == CrewState.WORKERS.state
 
         data = await state.get_data()
@@ -346,50 +361,9 @@ async def _run_flow(monkeypatch) -> tuple[StubCrewService, StubBot]:
         data = await state.get_data()
         assert data.get("crew_selected_worker_ids") == [2]
 
-        confirm_message = DummyMessage(
-            bot=bot,
-            chat_id=chat_id,
-            user_id=user_id,
-            message_id=bot.allocate_id(),
-            text=CONFIRM_BUTTON,
-        )
-        await crew.handle_workers_step(confirm_message, state)
-
-        data = await state.get_data()
-        assert data.get("crew_confirmation_pending") is True
-        assert not service.saved_calls
-
-        edit_message = DummyMessage(
-            bot=bot,
-            chat_id=chat_id,
-            user_id=user_id,
-            message_id=bot.allocate_id(),
-            text=EDIT_BUTTON,
-        )
-        await crew.handle_workers_step(edit_message, state)
-        data = await state.get_data()
-        assert not data.get("crew_confirmation_pending")
-
-        # Повторное подтверждение -> снова сводка
-        confirm_message_2 = DummyMessage(
-            bot=bot,
-            chat_id=chat_id,
-            user_id=user_id,
-            message_id=bot.allocate_id(),
-            text=CONFIRM_BUTTON,
-        )
-        await crew.handle_workers_step(confirm_message_2, state)
-        data = await state.get_data()
-        assert data.get("crew_confirmation_pending") is True
-
-        confirm_finish = DummyMessage(
-            bot=bot,
-            chat_id=chat_id,
-            user_id=user_id,
-            message_id=bot.allocate_id(),
-            text=CONFIRM_BUTTON,
-        )
-        await crew.handle_workers_step(confirm_finish, state)
+        updated_summary = bot._storage[(chat_id, summary_id)]
+        confirm_callback = DummyCallback(updated_summary, WORKERS_CONFIRM_CALLBACK)
+        await crew.handle_workers_confirm(confirm_callback, state)
 
         assert service.saved_calls
         assert await state.get_state() is None

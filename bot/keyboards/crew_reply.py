@@ -19,8 +19,8 @@ __all__ = [
     "START_BUTTON",
     "MENU_BUTTON",
     "BACK_BUTTON",
-    "NEXT_BUTTON",
     "ADD_DRIVER_BUTTON",
+    "ADD_WORKER_BUTTON",
     "CLEAR_WORKERS_BUTTON",
     "CONFIRM_BUTTON",
     "EDIT_BUTTON",
@@ -34,8 +34,8 @@ __all__ = [
 START_BUTTON = "▶️ Начать заполнение"
 MENU_BUTTON = "🏠 в меню смены"
 BACK_BUTTON = "⬅ назад"
-NEXT_BUTTON = "➡ далее"
 ADD_DRIVER_BUTTON = "➕ добавить водителя"
+ADD_WORKER_BUTTON = "➕ добавить рабочего"
 CLEAR_WORKERS_BUTTON = "🧹 очистить список"
 CONFIRM_BUTTON = "✅ подтвердить"
 EDIT_BUTTON = "✏️ изменить"
@@ -73,13 +73,7 @@ def make_driver_kb(
 
     builder.row(KeyboardButton(text=ADD_DRIVER_BUTTON))
 
-    navigation: list[KeyboardButton] = [
-        KeyboardButton(text=BACK_BUTTON),
-        KeyboardButton(text=MENU_BUTTON),
-    ]
-    if driver_id is not None:
-        navigation.append(KeyboardButton(text=NEXT_BUTTON))
-    builder.row(*navigation)
+    builder.row(KeyboardButton(text=BACK_BUTTON), KeyboardButton(text=MENU_BUTTON))
 
     return builder.as_markup(resize_keyboard=True), mapping
 
@@ -107,14 +101,13 @@ def make_workers_kb(
     if row:
         builder.row(*row)
 
+    builder.row(KeyboardButton(text=ADD_WORKER_BUTTON))
     builder.row(KeyboardButton(text=CLEAR_WORKERS_BUTTON))
 
     navigation: list[KeyboardButton] = [
         KeyboardButton(text=BACK_BUTTON),
         KeyboardButton(text=MENU_BUTTON),
     ]
-    if selected_set:
-        navigation.append(KeyboardButton(text=CONFIRM_BUTTON))
     builder.row(*navigation)
 
     return builder.as_markup(resize_keyboard=True), mapping
