@@ -51,6 +51,12 @@ _service: CrewSheetsService | None = None
 # ---------------------------------------------------------------------------
 
 
+def _norm(text: str | None) -> str:
+    """Упрощённый алиас для нормализации текста кнопок."""
+
+    return norm_text(text)
+
+
 def _get_service() -> CrewSheetsService:
     global _service
     if _service is None:
@@ -103,9 +109,9 @@ def _deserialize_workers(raw: Iterable[dict[str, Any]] | None) -> list[CrewWorke
 
 
 def _resolve_choice(mapping: dict[str, int], text: str | None) -> int | None:
-    target = norm_text(text)
+    target = _norm(text)
     for key, value in mapping.items():
-        if norm_text(key) == target:
+        if _norm(key) == target:
             return value
     return None
 
@@ -439,7 +445,7 @@ async def start_crew(message: types.Message, state: FSMContext, user_id: int) ->
     await _enter_intro(message, state)
 
 
-@router.message(F.text.func(lambda text: norm_text(text) == norm_text(MENU_BUTTON)))
+@router.message(F.text.func(lambda text: _norm(text) == _norm(MENU_BUTTON)))
 async def handle_intro_menu(message: types.Message, state: FSMContext) -> None:
     """Обрабатывает кнопку возврата в меню смены из любого шага."""
 
@@ -451,7 +457,7 @@ async def handle_intro_menu(message: types.Message, state: FSMContext) -> None:
     await _return_to_menu(message, state)
 
 
-@router.message(CrewState.INTRO, F.text.func(lambda text: norm_text(text) == norm_text(START_BUTTON)))
+@router.message(CrewState.INTRO, F.text.func(lambda text: _norm(text) == _norm(START_BUTTON)))
 async def handle_intro_start(message: types.Message, state: FSMContext) -> None:
     """Переходит от интро к шагу выбора водителя."""
 
@@ -460,7 +466,8 @@ async def handle_intro_start(message: types.Message, state: FSMContext) -> None:
         await state.get_state(),
         message.text,
     )
-    await _enter_driver_step(message, state)
+    await state.set_state(CrewState.DRIVER)
+    await ask_driver(message, state)
 
 
 @router.message(CrewState.DRIVER)
@@ -473,19 +480,19 @@ async def handle_driver_step(message: types.Message, state: FSMContext) -> None:
         message.text,
     )
     text = message.text or ""
-    text_norm = norm_text(text)
+    text_norm = _norm(text)
 
-    if text_norm == norm_text(MENU_BUTTON):
+    if text_norm == _norm(MENU_BUTTON):
         await _return_to_menu(message, state)
         return
-    if text_norm == norm_text(BACK_BUTTON):
+    if text_norm == _norm(BACK_BUTTON):
         await _enter_intro(message, state)
         return
-    if text_norm == norm_text(ADD_DRIVER_BUTTON):
+    if text_norm == _norm(ADD_DRIVER_BUTTON):
         await flash_message(message, "Добавление водителя пока недоступно.")
         await _enter_driver_step(message, state)
         return
-    if text_norm == norm_text(NEXT_BUTTON):
+    if text_norm == _norm(NEXT_BUTTON):
         data = await state.get_data()
         driver_id = data.get("crew_driver_id")
         if isinstance(driver_id, int):
@@ -520,17 +527,17 @@ async def handle_workers_step(message: types.Message, state: FSMContext) -> None
         message.text,
     )
     text = message.text or ""
-    text_norm = norm_text(text)
+    text_norm = _norm(text)
 
-    if text_norm == norm_text(MENU_BUTTON):
+    if text_norm == _norm(MENU_BUTTON):
         await state.update_data(crew_confirmation_pending=False)
         await _return_to_menu(message, state)
         return
-    if text_norm == norm_text(BACK_BUTTON):
+    if text_norm == _norm(BACK_BUTTON):
         await state.update_data(crew_confirmation_pending=False)
         await _enter_driver_step(message, state)
         return
-    if text_norm == norm_text(CLEAR_WORKERS_BUTTON):
+    if text_norm == _norm(CLEAR_WORKERS_BUTTON):
         await state.update_data(
             crew_selected_worker_ids=[],
             crew_selected_worker_names=[],
@@ -544,15 +551,15 @@ async def handle_workers_step(message: types.Message, state: FSMContext) -> None
     confirmation_pending = bool(data.get("crew_confirmation_pending"))
 
     if confirmation_pending:
-        if text_norm == norm_text(CONFIRM_BUTTON):
+        if text_norm == _norm(CONFIRM_BUTTON):
             await _save_and_finish(message, state)
             return
-        if text_norm == norm_text(EDIT_BUTTON):
+        if text_norm == _norm(EDIT_BUTTON):
             await state.update_data(crew_confirmation_pending=False)
             await _enter_workers_step(message, state)
             return
 
-    if text_norm == norm_text(CONFIRM_BUTTON):
+    if text_norm == _norm(CONFIRM_BUTTON):
         await _show_confirmation(message, state)
         return
 
@@ -638,6 +645,12 @@ async def enter_workers_step(message: types.Message, state: FSMContext) -> None:
     await _enter_workers_step(message, state)
 
 
+async def ask_driver(message: types.Message, state: FSMContext) -> None:
+    """Алиас для совместимости с тестами, ожидающими ask_driver."""
+
+    await _enter_driver_step(message, state)
+
+
 __all__ = [
     "CrewState",
     "start_crew",
@@ -648,5 +661,6 @@ __all__ = [
     "handle_intro_menu",
     "enter_driver_step",
     "enter_workers_step",
+    "ask_driver",
     "render_workers_inline_list",
 ]
