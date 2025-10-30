@@ -319,7 +319,7 @@ async def render_shift_menu(
         expenses_done=session.modes["expenses"],
         materials_done=session.modes["materials"],
         crew_done=session.modes["crew"],
-        show_finish=all(session.modes.values()) and not session.closed,
+        show_finish=all(session.modes.values()),
     )
 
     lines = "\n".join(_menu_lines(session))
