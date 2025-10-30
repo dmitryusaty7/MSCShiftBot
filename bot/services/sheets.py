@@ -22,6 +22,7 @@ class CrewSheetsService:
 
     def __init__(self, base: SheetsService | None = None) -> None:
         self._base = base or SheetsService()
+        self._locally_closed_rows: set[int] = set()
 
     # Базовые прокси -----------------------------------------------------
     def get_shift_row_index_for_user(self, telegram_id: int) -> int | None:
@@ -86,6 +87,7 @@ class ShiftCloseSheetsService:
 
     def __init__(self, base: SheetsService | None = None) -> None:
         self._base = base or SheetsService()
+        self._locally_closed_rows: set[int] = set()
 
     def get_shift_progress(self, user_id: int, row: int) -> dict[str, bool]:
         """Возвращает статусы готовности разделов смены."""
@@ -121,12 +123,18 @@ class ShiftCloseSheetsService:
         user_id: int,
         timestamp: datetime | None = None,
     ) -> bool:
-        """Помечает смену закрытой и возвращает результат операции."""
+        """Отмечает закрытие смены локально, не изменяя таблицы."""
 
-        # ``SheetsService.finalize_shift`` самостоятельно ставит отметку и
-        # фиксирует текущую временную метку, поэтому переданный ``timestamp``
-        # используется только для интерфейсной совместимости.
-        return self._base.finalize_shift(user_id, row)
+        if row in self._locally_closed_rows:
+            return False
+
+        try:
+            already_closed = self._base.is_shift_closed(row)
+        except Exception:  # pragma: no cover - сетевые ошибки обрабатываются выше
+            already_closed = False
+
+        self._locally_closed_rows.add(row)
+        return not already_closed
 
     def base_service(self) -> SheetsService:
         """Возвращает исходный ``SheetsService``."""

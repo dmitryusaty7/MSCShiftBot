@@ -43,6 +43,7 @@ class GroupNotificationContext:
     vessel: str
     expenses_total: str
     materials_summary: str
+    materials_link: str | None
     crew_summary: str
 
 
@@ -71,8 +72,6 @@ def _format_materials(summary: dict[str, Any] | None) -> str:
     pvd = summary.get("pvd_rolls_m")
     pvc = summary.get("pvc_tubes")
     tape = summary.get("tape")
-    photos = summary.get("photos_link")
-
     parts: list[str] = []
     if isinstance(pvd, int) and pvd > 0:
         parts.append(f"ПВД {pvd} м")
@@ -80,10 +79,40 @@ def _format_materials(summary: dict[str, Any] | None) -> str:
         parts.append(f"ПВХ {pvc} шт")
     if isinstance(tape, int) and tape > 0:
         parts.append(f"Скотч {tape} шт")
-    if isinstance(photos, str) and photos.strip():
-        parts.append("Фото загружены")
 
     return "; ".join(parts) if parts else "—"
+
+
+def _format_shift_date(raw_value: str, fallback: str | None = None) -> str:
+    """Преобразует дату смены к формату ДД.ММ.ГГГГ."""
+
+    def _normalize(candidate: str | None) -> str | None:
+        text = (candidate or "").strip()
+        if not text:
+            return None
+
+        for pattern in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%d.%m.%Y"):
+            try:
+                parsed = datetime.strptime(text, pattern)
+                return parsed.strftime("%d.%m.%Y")
+            except ValueError:
+                continue
+
+        if text.isdigit():
+            try:
+                excel_start = datetime(1899, 12, 30)
+                return (excel_start + timedelta(days=int(text))).strftime("%d.%m.%Y")
+            except Exception:  # noqa: BLE001 - защитный путь
+                return text
+
+        return text
+
+    for option in (raw_value, fallback):
+        normalized = _normalize(option)
+        if normalized:
+            return normalized
+
+    return datetime.now().strftime("%d.%m.%Y")
 
 
 def _format_crew(summary: dict[str, Any] | None) -> str:
@@ -128,6 +157,8 @@ def _parse_int(value: Any) -> int:
 def _compose_notification_context(
     user_name: str,
     summary: dict[str, Any],
+    *,
+    shift_date: str,
 ) -> GroupNotificationContext:
     """Строит контекст уведомления для группового чата."""
 
@@ -144,7 +175,13 @@ def _compose_notification_context(
         )
         total = provided_total or calculated
 
-    date_value = str(summary.get("date", "")).strip() or "—"
+    raw_link = ""
+    if isinstance(materials, dict):
+        link_value = materials.get("photos_link")
+        if isinstance(link_value, str):
+            raw_link = link_value.strip()
+
+    date_value = _format_shift_date(shift_date, str(summary.get("date", "")))
     vessel_value = str(summary.get("ship", "")).strip() or "—"
 
     return GroupNotificationContext(
@@ -153,6 +190,7 @@ def _compose_notification_context(
         vessel=vessel_value,
         expenses_total=_format_money(total),
         materials_summary=_format_materials(materials),
+        materials_link=raw_link or None,
         crew_summary=_format_crew(crew),
     )
 
@@ -160,13 +198,23 @@ def _compose_notification_context(
 def _format_group_report(ctx: GroupNotificationContext) -> str:
     """Формирует HTML-сообщение для рабочего чата."""
 
+    materials_summary = ctx.materials_summary or "—"
+    materials_text = escape(materials_summary)
+    link = (ctx.materials_link or "").strip()
+    if link:
+        safe_link = escape(link, quote=True)
+        if materials_text == "—":
+            materials_text = f'<a href="{safe_link}">фото</a>'
+        else:
+            materials_text = f"{materials_text} (<a href='{safe_link}'>фото</a>)"
+
     return (
         "<b>✅ Смена закрыта</b>\n"
         f"📅 {escape(ctx.date)}\n"
         f"🧑‍✈️ {escape(ctx.user)}\n"
         f"🛥 {escape(ctx.vessel)}\n\n"
         f"🧾 Расходы: {escape(ctx.expenses_total)}\n"
-        f"📦 Материалы: {escape(ctx.materials_summary)}\n"
+        f"📦 Материалы: {materials_text}\n"
         f"👥 Бригада: {escape(ctx.crew_summary)}"
     )
 
@@ -307,6 +355,16 @@ async def handle_shift_close_request(message: types.Message, state: FSMContext) 
         )
         return
 
+    try:
+        raw_date = await asyncio.to_thread(service.get_shift_date, row)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Не удалось получить дату смены из таблицы (row=%s)",
+            row,
+            exc_info=True,
+        )
+        raw_date = str(summary.get("date", ""))
+
     brigadier_name = await _resolve_brigadier_name(
         user_id,
         summary,
@@ -336,7 +394,16 @@ async def handle_shift_close_request(message: types.Message, state: FSMContext) 
         )
         return
 
-    context = _compose_notification_context(brigadier_name, summary)
+    try:
+        await flash_message(message, "Сохраняю данные…", ttl=2.0)
+    except Exception:  # noqa: BLE001
+        logger.debug("Не удалось показать flash перед отправкой отчёта", exc_info=True)
+
+    context = _compose_notification_context(
+        brigadier_name,
+        summary,
+        shift_date=raw_date,
+    )
     if closed_now:
         await _notify_group(message.bot, context, row=row)
     else:
