@@ -23,7 +23,7 @@ EXPENSES_PREFIX = "🧾 Расходы"
 MATERIALS_PREFIX = "📦 Материалы"
 CREW_PREFIX = "👥 Состав бригады"
 SHIFT_BACK_BUTTON = "🏠 В главную панель"
-FINISH_SHIFT_BUTTON = "✅ Закрыть смену"
+FINISH_SHIFT_BUTTON = "✅ Закончить смену"
 
 
 def _status_badge(done: bool) -> str:

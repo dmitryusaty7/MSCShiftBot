@@ -12,7 +12,6 @@ from typing import Any
 from aiogram import F, Router, types
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 
 from bot.handlers.shift_menu import (
     ShiftState,
@@ -21,29 +20,18 @@ from bot.handlers.shift_menu import (
     render_shift_menu,
 )
 from bot.keyboards.dashboard import FINISH_SHIFT_BUTTON
-from bot.keyboards.shift_close import (
-    CANCEL_CLOSE_BUTTON,
-    CONFIRM_CLOSE_BUTTON,
-    close_confirmation_keyboard,
-)
-from bot.utils.cleanup import cleanup_after_confirm, cleanup_screen, send_screen_message
+from bot.services.sheets import ShiftCloseSheetsService
+from bot.utils.cleanup import cleanup_after_confirm
 from bot.utils.flash import flash_message
 from services.env import get_group_chat_id
-from services.sheets import SheetsService
 
 logger = logging.getLogger(__name__)
 
 router = Router(name="shift-close")
 
-_service: SheetsService | None = None
+_service: ShiftCloseSheetsService | None = None
 _NOTIFY_CACHE_TTL = timedelta(minutes=10)
 _last_notified: dict[int, datetime] = {}
-
-
-class ShiftCloseState(StatesGroup):
-    """Состояния подтверждения закрытия смены."""
-
-    CONFIRM = State()
 
 
 @dataclass
@@ -53,18 +41,18 @@ class GroupNotificationContext:
     date: str
     user: str
     vessel: str
-    statuses: str
     expenses_total: str
     materials_summary: str
+    materials_link: str | None
     crew_summary: str
 
 
-def _get_service() -> SheetsService:
-    """Возвращает общий экземпляр сервиса таблиц."""
+def _get_service() -> ShiftCloseSheetsService:
+    """Возвращает общий экземпляр сервиса таблиц для закрытия смены."""
 
     global _service
     if _service is None:
-        _service = SheetsService()
+        _service = ShiftCloseSheetsService()
     return _service
 
 
@@ -84,8 +72,6 @@ def _format_materials(summary: dict[str, Any] | None) -> str:
     pvd = summary.get("pvd_rolls_m")
     pvc = summary.get("pvc_tubes")
     tape = summary.get("tape")
-    photos = summary.get("photos_link")
-
     parts: list[str] = []
     if isinstance(pvd, int) and pvd > 0:
         parts.append(f"ПВД {pvd} м")
@@ -93,10 +79,40 @@ def _format_materials(summary: dict[str, Any] | None) -> str:
         parts.append(f"ПВХ {pvc} шт")
     if isinstance(tape, int) and tape > 0:
         parts.append(f"Скотч {tape} шт")
-    if isinstance(photos, str) and photos.strip():
-        parts.append("Фото загружены")
 
     return "; ".join(parts) if parts else "—"
+
+
+def _format_shift_date(raw_value: str, fallback: str | None = None) -> str:
+    """Преобразует дату смены к формату ДД.ММ.ГГГГ."""
+
+    def _normalize(candidate: str | None) -> str | None:
+        text = (candidate or "").strip()
+        if not text:
+            return None
+
+        for pattern in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%d.%m.%Y"):
+            try:
+                parsed = datetime.strptime(text, pattern)
+                return parsed.strftime("%d.%m.%Y")
+            except ValueError:
+                continue
+
+        if text.isdigit():
+            try:
+                excel_start = datetime(1899, 12, 30)
+                return (excel_start + timedelta(days=int(text))).strftime("%d.%m.%Y")
+            except Exception:  # noqa: BLE001 - защитный путь
+                return text
+
+        return text
+
+    for option in (raw_value, fallback):
+        normalized = _normalize(option)
+        if normalized:
+            return normalized
+
+    return datetime.now().strftime("%d.%m.%Y")
 
 
 def _format_crew(summary: dict[str, Any] | None) -> str:
@@ -141,6 +157,8 @@ def _parse_int(value: Any) -> int:
 def _compose_notification_context(
     user_name: str,
     summary: dict[str, Any],
+    *,
+    shift_date: str,
 ) -> GroupNotificationContext:
     """Строит контекст уведомления для группового чата."""
 
@@ -157,18 +175,22 @@ def _compose_notification_context(
         )
         total = provided_total or calculated
 
-    date_value = str(summary.get("date", "")).strip() or "—"
-    vessel_value = str(summary.get("ship", "")).strip() or "—"
+    raw_link = ""
+    if isinstance(materials, dict):
+        link_value = materials.get("photos_link")
+        if isinstance(link_value, str):
+            raw_link = link_value.strip()
 
-    statuses_line = "📊 Статусы: ✅ Расходы • ✅ Материалы • ✅ Бригада"
+    date_value = _format_shift_date(shift_date, str(summary.get("date", "")))
+    vessel_value = str(summary.get("ship", "")).strip() or "—"
 
     return GroupNotificationContext(
         date=date_value,
         user=user_name,
         vessel=vessel_value,
-        statuses=statuses_line,
         expenses_total=_format_money(total),
         materials_summary=_format_materials(materials),
+        materials_link=raw_link or None,
         crew_summary=_format_crew(crew),
     )
 
@@ -176,14 +198,23 @@ def _compose_notification_context(
 def _format_group_report(ctx: GroupNotificationContext) -> str:
     """Формирует HTML-сообщение для рабочего чата."""
 
+    materials_summary = ctx.materials_summary or "—"
+    materials_text = escape(materials_summary)
+    link = (ctx.materials_link or "").strip()
+    if link:
+        safe_link = escape(link, quote=True)
+        if materials_text == "—":
+            materials_text = f'<a href="{safe_link}">фото</a>'
+        else:
+            materials_text = f"{materials_text} (<a href='{safe_link}'>фото</a>)"
+
     return (
         "<b>✅ Смена закрыта</b>\n"
         f"📅 {escape(ctx.date)}\n"
         f"🧑‍✈️ {escape(ctx.user)}\n"
-        f"🛥 {escape(ctx.vessel)}\n"
-        f"{escape(ctx.statuses)}\n\n"
+        f"🛥 {escape(ctx.vessel)}\n\n"
         f"🧾 Расходы: {escape(ctx.expenses_total)}\n"
-        f"📦 Материалы: {escape(ctx.materials_summary)}\n"
+        f"📦 Материалы: {materials_text}\n"
         f"👥 Бригада: {escape(ctx.crew_summary)}"
     )
 
@@ -242,36 +273,9 @@ async def _notify_group(bot: types.Bot, ctx: GroupNotificationContext, *, row: i
         _mark_notified(row, now)
 
 
-async def _return_to_menu(
-    message: types.Message,
-    state: FSMContext,
-    *,
-    user_id: int,
-    row: int | None,
-    service: SheetsService,
-    flash_text: str | None = None,
-    flash_ttl: float = 3.0,
-) -> None:
-    """Возвращает пользователя в меню смены после ошибки или отмены."""
-
-    await cleanup_screen(message.bot, message.chat.id, keep_start=True)
-    if flash_text:
-        await flash_message(message, flash_text, ttl=flash_ttl)
-    await render_shift_menu(
-        message,
-        user_id,
-        row,
-        service=service,
-        state=state,
-        delete_trigger_message=False,
-        show_progress=False,
-        use_screen_message=True,
-    )
-
-
 @router.message(ShiftState.ACTIVE, F.text == FINISH_SHIFT_BUTTON)
 async def handle_shift_close_request(message: types.Message, state: FSMContext) -> None:
-    """Обрабатывает запрос на закрытие смены из меню."""
+    """Закрывает смену при нажатии кнопки меню."""
 
     user_id = message.from_user.id
     session = get_shift_session(user_id)
@@ -283,46 +287,27 @@ async def handle_shift_close_request(message: types.Message, state: FSMContext) 
 
     service = _get_service()
     row = session.row
+    base_service = service.base_service()
 
     try:
-        await flash_message(message, "💾 Проверяю готовность разделов…", ttl=1.5)
+        await flash_message(message, "💾 Сохраняю…", ttl=1.5)
     except Exception:  # noqa: BLE001
-        logger.debug("Не удалось показать flash перед проверкой закрытия", exc_info=True)
-
-    try:
-        closed = await asyncio.to_thread(service.is_shift_closed, row)
-    except Exception:  # noqa: BLE001
-        logger.exception("Ошибка проверки статуса закрытия (user_id=%s, row=%s)", user_id, row)
-        await message.answer(
-            "⚠️ Не удалось проверить статус смены. Попробуйте позже."  # noqa: G004
-        )
-        return
-
-    if closed:
-        mark_shift_closed(user_id)
-        await message.answer("Смена уже закрыта. Откройте новую смену через главную панель завтра.")
-        return
+        logger.debug("Не удалось показать flash перед закрытием", exc_info=True)
 
     try:
         progress = await asyncio.to_thread(service.get_shift_progress, user_id, row)
     except Exception:  # noqa: BLE001
         logger.exception("Не удалось получить прогресс смены (user_id=%s, row=%s)", user_id, row)
-        await message.answer(
-            "⚠️ Ошибка при проверке разделов. Попробуйте позже."  # noqa: G004
-        )
-        return
-
-    if not all(progress.values()):
         await flash_message(
             message,
-            "⚠️ Не все разделы заполнены. Проверьте Расходы, Материалы и Состав.",
+            "⚠️ Не удалось проверить разделы. Попробуйте позже.",
             ttl=3.0,
         )
         await render_shift_menu(
             message,
             user_id,
             row,
-            service=service,
+            service=base_service,
             state=state,
             delete_trigger_message=False,
             show_progress=False,
@@ -330,22 +315,123 @@ async def handle_shift_close_request(message: types.Message, state: FSMContext) 
         )
         return
 
-    await state.update_data(shift_close_row=row)
-    await state.set_state(ShiftCloseState.CONFIRM)
+    all_ready = all(bool(progress.get(mode)) for mode in ("expenses", "materials", "crew"))
+    if not all_ready:
+        await flash_message(
+            message,
+            "⚠️ Не все разделы заполнены. Проверьте разделы.",
+            ttl=2.5,
+        )
+        await render_shift_menu(
+            message,
+            user_id,
+            row,
+            service=base_service,
+            state=state,
+            delete_trigger_message=False,
+            show_progress=False,
+            use_screen_message=True,
+        )
+        return
 
-    await cleanup_screen(message.bot, message.chat.id, keep_start=True)
-    await send_screen_message(
-        message,
-        "✅ Все разделы заполнены.\n\nЗакрыть смену и зафиксировать данные?",
-        reply_markup=close_confirmation_keyboard(),
+    try:
+        summary = await asyncio.to_thread(service.get_shift_summary, row)
+    except Exception:  # noqa: BLE001
+        logger.exception("Не удалось получить сводку смены (user_id=%s, row=%s)", user_id, row)
+        await flash_message(
+            message,
+            "⚠️ Ошибка при закрытии смены. Попробуйте позже.",
+            ttl=3.0,
+        )
+        await render_shift_menu(
+            message,
+            user_id,
+            row,
+            service=base_service,
+            state=state,
+            delete_trigger_message=False,
+            show_progress=False,
+            use_screen_message=True,
+        )
+        return
+
+    try:
+        raw_date = await asyncio.to_thread(service.get_shift_date, row)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Не удалось получить дату смены из таблицы (row=%s)",
+            row,
+            exc_info=True,
+        )
+        raw_date = str(summary.get("date", ""))
+
+    brigadier_name = await _resolve_brigadier_name(
+        user_id,
+        summary,
+        service=service,
+        message=message,
     )
+
+    timestamp = datetime.now()
+    try:
+        closed_now = await asyncio.to_thread(service.mark_shift_closed, row, user_id, timestamp)
+    except Exception:  # noqa: BLE001
+        logger.exception("Ошибка при закрытии смены (user_id=%s, row=%s)", user_id, row)
+        await flash_message(
+            message,
+            "⚠️ Ошибка при закрытии смены. Попробуйте позже.",
+            ttl=3.0,
+        )
+        await render_shift_menu(
+            message,
+            user_id,
+            row,
+            service=base_service,
+            state=state,
+            delete_trigger_message=False,
+            show_progress=False,
+            use_screen_message=True,
+        )
+        return
+
+    try:
+        await flash_message(message, "Сохраняю данные…", ttl=2.0)
+    except Exception:  # noqa: BLE001
+        logger.debug("Не удалось показать flash перед отправкой отчёта", exc_info=True)
+
+    context = _compose_notification_context(
+        brigadier_name,
+        summary,
+        shift_date=raw_date,
+    )
+    if closed_now:
+        await _notify_group(message.bot, context, row=row)
+    else:
+        logger.info("Смена уже была закрыта ранее (user_id=%s, row=%s)", user_id, row)
+
+    mark_shift_closed(user_id)
+
+    await cleanup_after_confirm(message, state, keep_start=False)
+
+    if state is not None:
+        await state.set_state(ShiftState.IDLE)
+        await state.update_data(shift_close_row=None)
+
+    try:
+        await flash_message(message, "✅ Смена закрыта.", ttl=1.5)
+    except Exception:  # noqa: BLE001
+        logger.debug("Не удалось показать подтверждение закрытия", exc_info=True)
+
+    from bot.handlers.dashboard import show_dashboard
+
+    await show_dashboard(message, state=state, service=base_service)
 
 
 async def _resolve_brigadier_name(
     user_id: int,
     summary: dict[str, Any] | None,
     *,
-    service: SheetsService,
+    service: ShiftCloseSheetsService,
     message: types.Message,
 ) -> str:
     """Определяет ФИО бригадира для отчёта."""
@@ -380,119 +466,3 @@ async def _resolve_brigadier_name(
     return str(user_id)
 
 
-@router.message(ShiftCloseState.CONFIRM, F.text == CONFIRM_CLOSE_BUTTON)
-async def handle_shift_close_confirm(message: types.Message, state: FSMContext) -> None:
-    """Подтверждает закрытие смены после проверки пользователя."""
-
-    user_id = message.from_user.id
-    data = await state.get_data()
-    row = data.get("shift_close_row") if isinstance(data, dict) else None
-    if not isinstance(row, int) or row <= 0:
-        await state.set_state(ShiftState.ACTIVE)
-        await render_shift_menu(
-            message,
-            user_id,
-            None,
-            service=_get_service(),
-            state=state,
-            delete_trigger_message=False,
-            show_progress=True,
-            use_screen_message=True,
-        )
-        return
-
-    service = _get_service()
-
-    try:
-        await flash_message(message, "💾 Сохраняю…", ttl=1.5)
-    except Exception:  # noqa: BLE001
-        logger.debug("Не удалось показать flash при сохранении", exc_info=True)
-
-    summary: dict[str, Any] | None = None
-    try:
-        summary = await asyncio.to_thread(service.get_shift_summary, row)
-        if not isinstance(summary, dict):
-            raise RuntimeError("summary must be dict")
-    except Exception:  # noqa: BLE001
-        logger.exception("Не удалось получить сводку смены (user_id=%s, row=%s)", user_id, row)
-        await state.set_state(ShiftState.ACTIVE)
-        await state.update_data(shift_close_row=None)
-        await _return_to_menu(
-            message,
-            state,
-            user_id=user_id,
-            row=row,
-            service=service,
-            flash_text="⚠️ Ошибка при закрытии смены. Попробуйте позже.",
-        )
-        return
-
-    try:
-        closed_now = await asyncio.to_thread(service.finalize_shift, user_id, row)
-    except Exception:  # noqa: BLE001
-        logger.exception("Ошибка при закрытии смены (user_id=%s, row=%s)", user_id, row)
-        await state.set_state(ShiftState.ACTIVE)
-        await state.update_data(shift_close_row=None)
-        await _return_to_menu(
-            message,
-            state,
-            user_id=user_id,
-            row=row,
-            service=service,
-            flash_text="⚠️ Ошибка при закрытии смены. Попробуйте позже.",
-        )
-        return
-
-    if not closed_now:
-        logger.info("Смена уже была закрыта ранее (user_id=%s, row=%s)", user_id, row)
-
-    now = datetime.now()
-    brigadier_name = await _resolve_brigadier_name(
-        user_id,
-        summary,
-        service=service,
-        message=message,
-    )
-    context = _compose_notification_context(brigadier_name, summary)
-    await _notify_group(message.bot, context, row=row)
-
-    mark_shift_closed(user_id)
-    await state.set_state(ShiftState.IDLE)
-    await state.update_data(shift_close_row=None)
-
-    await cleanup_after_confirm(message, state, keep_start=False)
-
-    try:
-        await flash_message(message, "✅ Смена закрыта.", ttl=1.5)
-    except Exception:  # noqa: BLE001
-        logger.debug("Не удалось показать подтверждение закрытия", exc_info=True)
-
-    from bot.handlers.dashboard import show_dashboard
-
-    await show_dashboard(message, state=state, service=service)
-
-
-@router.message(ShiftCloseState.CONFIRM, F.text == CANCEL_CLOSE_BUTTON)
-async def handle_shift_close_cancel(message: types.Message, state: FSMContext) -> None:
-    """Отменяет процедуру закрытия и возвращает пользователя в меню."""
-
-    user_id = message.from_user.id
-    data = await state.get_data()
-    row = data.get("shift_close_row") if isinstance(data, dict) else None
-    service = _get_service()
-
-    await state.set_state(ShiftState.ACTIVE)
-    await state.update_data(shift_close_row=None)
-
-    await cleanup_screen(message.bot, message.chat.id, keep_start=True)
-    await flash_message(message, "↩ Закрытие отменено.", ttl=1.2)
-    await render_shift_menu(
-        message,
-        user_id,
-        row,
-        service=service,
-        state=state,
-        delete_trigger_message=False,
-        show_progress=False,
-        use_screen_message=True,
-    )

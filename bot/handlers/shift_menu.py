@@ -179,13 +179,11 @@ def _menu_lines(session: ShiftSession) -> list[str]:
         _line("🧾 Расходы", session.modes["expenses"]),
         _line("📦 Материалы", session.modes["materials"]),
         _line("👥 Состав бригады", session.modes["crew"]),
-        "",
-        "Выберите раздел для заполнения. Кнопка «Закрыть смену» появится, когда все разделы будут отмечены как готовые.",
     ]
-    if session.closed:
-        lines.append(
-            "Смена уже закрыта. Вернитесь в главную панель, чтобы открыть новую смену завтра."
-        )
+    lines.extend([
+        "",
+        "Выберите раздел для заполнения.",
+    ])
     return lines
 
 
@@ -236,6 +234,7 @@ async def render_shift_menu(
 
     target_row = row
     lock = None
+    progress: dict[str, bool] | None = None
     try:
         if target_row is None:
             lock = await acquire_user_lock(user_id)
@@ -279,6 +278,11 @@ async def render_shift_menu(
         )
         shift_closed = False
 
+    done_flags = {
+        key: bool(progress.get(key, False)) if progress else False
+        for key in MODE_KEYS.values()
+    }
+
     try:
         raw_date = await asyncio.to_thread(sheets.get_shift_date, target_row)
     except Exception:  # noqa: BLE001
@@ -290,7 +294,7 @@ async def render_shift_menu(
     session = _sync_session(
         user_id,
         row=target_row,
-        progress=progress,
+        progress=done_flags,
         shift_date=raw_date or date.today().isoformat(),
         closed=shift_closed,
     )
@@ -315,7 +319,7 @@ async def render_shift_menu(
         expenses_done=session.modes["expenses"],
         materials_done=session.modes["materials"],
         crew_done=session.modes["crew"],
-        show_finish=all(session.modes.values()) and not session.closed,
+        show_finish=all(session.modes.values()),
     )
 
     lines = "\n".join(_menu_lines(session))

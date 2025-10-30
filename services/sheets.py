@@ -1283,6 +1283,31 @@ class SheetsService:
         driver_value, workers_value = values
         return bool(driver_value) and bool(workers_value)
 
+    def get_shift_mode_status(
+        self,
+        row: int,
+        mode: str,
+        spreadsheet_id: Optional[str] = None,
+    ) -> str:
+        """Возвращает текстовый статус заполнения выбранного раздела смены."""
+
+        normalized = (mode or "").strip().lower()
+        sid = spreadsheet_id or require_env("SPREADSHEET_ID")
+
+        done = False
+        if normalized == "expenses":
+            worksheet = self._get_worksheet(SHEET_EXPENSES, sid)
+            columns = getattr(self, "EXPENSES_USER_COLS", EXPENSES_USER_COLS)
+            done = self._row_all_filled(worksheet, row, columns)
+        elif normalized == "materials":
+            done = self.materials_all_filled(row, sid)
+        elif normalized == "crew":
+            done = self.crew_all_filled(row, sid)
+        else:
+            logger.warning("Неизвестный режим смены: %s", mode)
+
+        return "✅ готово" if done else "✍️ заполнить"
+
     def is_shift_closed(
         self, row: int, spreadsheet_id: Optional[str] = None
     ) -> bool:
